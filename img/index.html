@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Skull Ronin — Procedural Three.js Character</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    background: radial-gradient(ellipse at 50% 40%, #40434d 0%, #23252b 48%, #0c0d10 100%);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: #cfd2d8;
+  }
+  canvas { display: block; outline: none; }
+  #hud {
+    position: fixed; left: 20px; bottom: 18px; pointer-events: none;
+    letter-spacing: .04em; text-shadow: 0 1px 6px rgba(0,0,0,.6);
+  }
+  #hud h1 { margin: 0 0 4px; font-size: 15px; font-weight: 600; letter-spacing: .2em; text-transform: uppercase; color: #e9e6df; }
+  #hud p  { margin: 0; font-size: 12px; opacity: .65; }
+  kbd { border: 1px solid #ffffff44; border-radius: 3px; padding: 0 4px; font-size: 11px; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="hud">
+  <h1>Skull Ronin</h1>
+  <p>Drag to orbit · Scroll to zoom · Right-drag to pan · <kbd>R</kbd> auto-rotate</p>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+
+/* ==========================================================================
+ *  SKULL RONIN — a fully procedural chibi skeleton samurai.
+ *  Scale: 1 unit ≈ 100 px of the reference image, the figure is ~5 units tall,
+ *  the ground is y = 0 and the character faces +Z.
+ * ========================================================================== */
+
+const V3 = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
+const V2 = (x = 0, y = 0) => new THREE.Vector2(x, y);
+const smoothstep = THREE.MathUtils.smoothstep;
+
+// Deterministic RNG so the model is identical on every load.
+const rand = (() => {
+  let s = 20240611;
+  return () => {
+    s |= 0; s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+})();
+
+/* ------------------------------------------------------------------ */
+/*  Materials                                                          */
+/* ------------------------------------------------------------------ */
+const M = {
+  bone:      new THREE.MeshPhysicalMaterial({ color: 0xe9e6dd, roughness: 0.52, clearcoat: 0.25, clearcoatRoughness: 0.55 }),
+  tooth:     new THREE.MeshPhysicalMaterial({ color: 0xe9e4d6, roughness: 0.45, clearcoat: 0.3 }),
+  void:      new THREE.MeshBasicMaterial({ color: 0x010101, side: THREE.DoubleSide }),
+  crack:     new THREE.MeshStandardMaterial({ color: 0x2a2724, roughness: 0.9 }),
+  armor:     new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.48, metalness: 0.35 }),
+  armorMatte:new THREE.MeshStandardMaterial({ color: 0x131314, roughness: 0.85, metalness: 0.1 }),
+  armorGloss:new THREE.MeshPhysicalMaterial({ color: 0x0d0d0e, roughness: 0.2, metalness: 0.55, clearcoat: 1, clearcoatRoughness: 0.12 }),
+  cloth:     new THREE.MeshStandardMaterial({ color: 0x0f0f10, roughness: 0.95 }),
+  hat:       new THREE.MeshPhysicalMaterial({ color: 0x131313, roughness: 0.45, metalness: 0.05, clearcoat: 0.7, clearcoatRoughness: 0.3, side: THREE.DoubleSide }),
+  horn:      new THREE.MeshPhysicalMaterial({ color: 0x0b0b0c, roughness: 0.22, metalness: 0.3, clearcoat: 1, clearcoatRoughness: 0.15 }),
+  tan:       new THREE.MeshStandardMaterial({ color: 0xc58a3f, roughness: 0.38, metalness: 0.65 }),
+  orange:    new THREE.MeshStandardMaterial({ color: 0xcc7a00, roughness: 0.45, metalness: 0.5 }),
+  leather:   new THREE.MeshStandardMaterial({ color: 0x8b4513, roughness: 0.7, metalness: 0.05 }),
+  glove:     new THREE.MeshStandardMaterial({ color: 0x0e0e0f, roughness: 0.7, metalness: 0.05 }),
+  pants:     new THREE.MeshStandardMaterial({ color: 0x52402e, roughness: 0.95 }),
+  pantsDark: new THREE.MeshStandardMaterial({ color: 0x3e3126, roughness: 0.95 }),
+  sock:      new THREE.MeshStandardMaterial({ color: 0xf6f6f3, roughness: 0.85 }),
+  toe:       new THREE.MeshPhysicalMaterial({ color: 0xf4f2ee, roughness: 0.45, clearcoat: 0.2 }),
+  sandal:    new THREE.MeshStandardMaterial({ color: 0x0c0c0c, roughness: 0.55, metalness: 0.05 }),
+  sole:      new THREE.MeshStandardMaterial({ color: 0xf2f2f0, roughness: 0.6 }),
+  base:      new THREE.MeshStandardMaterial({ color: 0x15161a, roughness: 0.8, metalness: 0.05 }),
+};
+
+/* ------------------------------------------------------------------ */
+/*  Generic geometry helpers                                           */
+/* ------------------------------------------------------------------ */
+
+/** Weld duplicate vertices and recompute smooth normals. */
+function smooth(geo, tol = 1e-4) {
+  geo.deleteAttribute('uv'); geo.deleteAttribute('normal');
+  const g = mergeVertices(geo, tol);
+  g.computeVertexNormals();
+  return g;
+}
+
+/**
+ * Loft a closed superellipse cross-section through a list of levels
+ * ({y, rx, rz, p, cx, cz}), bottom → top. p = 2 gives an ellipse, p → ∞ a box.
+ * Used for the coat, sleeves, armor plates, pants, socks, gloves…
+ */
+function loft(levels, { seg = 48, caps = true } = {}) {
+  const n = levels.length, pos = [], idx = [];
+  for (const L of levels) {
+    const e = 2 / (L.p ?? 2);
+    for (let i = 0; i < seg; i++) {
+      const a = (i / seg) * Math.PI * 2, c = Math.cos(a), s = Math.sin(a);
+      pos.push((L.cx ?? 0) + L.rx * Math.sign(c) * Math.abs(c) ** e, L.y,
+               (L.cz ?? 0) + L.rz * Math.sign(s) * Math.abs(s) ** e);
+    }
+  }
+  const flip = levels[0].y > levels[n - 1].y;
+  for (let j = 0; j < n - 1; j++) for (let i = 0; i < seg; i++) {
+    const a = j * seg + i, b = j * seg + (i + 1) % seg, c = (j + 1) * seg + i, d = (j + 1) * seg + (i + 1) % seg;
+    if (flip) idx.push(a, b, c, b, d, c); else idx.push(a, c, b, b, c, d);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  if (!caps) return g;
+  // Flat caps get their own vertices so they keep crisp edges.
+  const parts = [g];
+  for (const [li, up] of [[0, flip], [n - 1, !flip]]) {
+    const L = levels[li], cp = [], ci = [];
+    cp.push(L.cx ?? 0, L.y, L.cz ?? 0);
+    for (let i = 0; i < seg; i++) cp.push(pos[(li * seg + i) * 3], pos[(li * seg + i) * 3 + 1], pos[(li * seg + i) * 3 + 2]);
+    // li===0 & !flip → bottom cap (faces down); li===n-1 & !flip → top cap (faces up)
+    const faceUp = (li === n - 1) !== flip;
+    for (let i = 0; i < seg; i++) {
+      const a = 1 + i, b = 1 + (i + 1) % seg;
+      if (faceUp) ci.push(0, b, a); else ci.push(0, a, b);
+    }
+    const cg = new THREE.BufferGeometry();
+    cg.setAttribute('position', new THREE.Float32BufferAttribute(cp, 3));
+    cg.setIndex(ci); cg.computeVertexNormals();
+    parts.push(cg);
+  }
+  return mergeGeos(parts);
+}
+
+/** Merge geometries that all have position+normal (indexed). */
+function mergeGeos(list) {
+  const pos = [], nor = [], idx = [];
+  let off = 0;
+  for (const g of list) {
+    const p = g.attributes.position, n = g.attributes.normal;
+    for (let i = 0; i < p.count; i++) { pos.push(p.getX(i), p.getY(i), p.getZ(i)); nor.push(n.getX(i), n.getY(i), n.getZ(i)); }
+    for (let i = 0; i < g.index.count; i++) idx.push(g.index.getX(i) + off);
+    off += p.count;
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  out.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  out.setIndex(idx);
+  return out;
+}
+
+/** A bevelled armor plate: superellipse slab centred on y = 0. */
+function armorPlate(rx, rz, h, { p = 3, bevel = 0.025, seg = 40 } = {}) {
+  const b = Math.min(bevel, h * 0.4);
+  return loft([
+    { y: -h / 2,     rx: rx - b, rz: rz - b, p },
+    { y: -h / 2 + b, rx,         rz,         p },
+    { y:  h / 2 - b, rx,         rz,         p },
+    { y:  h / 2,     rx: rx - b, rz: rz - b, p },
+  ], { seg });
+}
+
+/** Tube with a per-position radius (horns, cords…). Tip closes when radius → 0. */
+function taperedTube(points, radiusFn, { tubular = 72, radial = 18 } = {}) {
+  const curve = new THREE.CatmullRomCurve3(points);
+  const frames = curve.computeFrenetFrames(tubular, false);
+  const pos = [], idx = [];
+  for (let i = 0; i <= tubular; i++) {
+    const t = i / tubular, P = curve.getPointAt(t), N = frames.normals[i], B = frames.binormals[i], r = radiusFn(t);
+    for (let j = 0; j < radial; j++) {
+      const a = (j / radial) * Math.PI * 2;
+      pos.push(P.x + r * (Math.cos(a) * N.x + Math.sin(a) * B.x),
+               P.y + r * (Math.cos(a) * N.y + Math.sin(a) * B.y),
+               P.z + r * (Math.cos(a) * N.z + Math.sin(a) * B.z));
+    }
+  }
+  for (let i = 0; i < tubular; i++) for (let j = 0; j < radial; j++) {
+    const a = i * radial + j, b = i * radial + (j + 1) % radial, c = (i + 1) * radial + j, d = (i + 1) * radial + (j + 1) % radial;
+    idx.push(a, b, c, b, d, c);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx); g.computeVertexNormals();
+  return g;
+}
+
+/** Quick mesh creation: add(parent, geometry, material, x, y, z, rx, ry, rz). */
+function add(parent, geo, mat, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0) {
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(x, y, z); m.rotation.set(rx, ry, rz);
+  parent.add(m);
+  return m;
+}
+
+/** Flat strap between two points. */
+function strap(parent, a, b, w, t, mat = M.armorMatte) {
+  const dir = V3().subVectors(b, a), len = dir.length();
+  const m = new THREE.Mesh(new RoundedBoxGeometry(w, len, t, 2, Math.min(w, t) * 0.3), mat);
+  m.position.copy(a).addScaledVector(dir, 0.5);
+  m.quaternion.setFromUnitVectors(V3(0, 1, 0), dir.normalize());
+  parent.add(m);
+  return m;
+}
+
+const rivet = (parent, x, y, z, r = 0.017, mat = M.tan) => {
+  const m = add(parent, new THREE.SphereGeometry(r, 10, 6), mat, x, y, z);
+  m.scale.z = 0.65;
+  return m;
+};
+
+/** Buckle: gold frame with a black centre, facing +Z. */
+function buckle(parent, x, y, z, w = 0.1, h = 0.08, rotZ = 0) {
+  const g = new THREE.Group();
+  g.position.set(x, y, z); g.rotation.z = rotZ;
+  add(g, new RoundedBoxGeometry(w, h, 0.03, 2, 0.008), M.tan);
+  add(g, new RoundedBoxGeometry(w * 0.6, h * 0.55, 0.036, 2, 0.006), M.armorGloss);
+  add(g, new RoundedBoxGeometry(w * 0.12, h * 1.05, 0.038, 2, 0.004), M.tan);
+  parent.add(g);
+  return g;
+}
+
+/** Small tactical pouch with a flap, button and stitching. */
+function pouch(parent, w, h, d, x, y, z, ry = 0, mat = M.armor) {
+  const g = new THREE.Group();
+  g.position.set(x, y, z); g.rotation.y = ry;
+  add(g, new RoundedBoxGeometry(w, h, d, 3, Math.min(w, h, d) * 0.22), mat);
+  add(g, new RoundedBoxGeometry(w * 1.04, h * 0.4, d * 1.18, 3, 0.012), M.armorGloss, 0, h * 0.3, d * 0.04);
+  add(g, new THREE.CylinderGeometry(0.02, 0.02, 0.02, 12), M.tan, 0, h * 0.14, d * 0.62, Math.PI / 2);
+  // stitching
+  for (const sx of [-1, 1]) add(g, new THREE.BoxGeometry(0.006, h * 0.5, 0.006), M.tan, sx * w * 0.42, -h * 0.12, d * 0.5);
+  add(g, new THREE.BoxGeometry(w * 0.7, 0.006, 0.006), M.tan, 0, -h * 0.4, d * 0.5);
+  parent.add(g);
+  return g;
+}
+
+/** Row of small vent slits. */
+function vents(parent, n, w, h, gap, x, y, z, ry = 0, mat = M.void) {
+  const g = new THREE.Group(); g.position.set(x, y, z); g.rotation.y = ry;
+  for (let i = 0; i < n; i++) add(g, new THREE.BoxGeometry(w, h, 0.02), mat, 0, (i - (n - 1) / 2) * gap, 0);
+  parent.add(g);
+  return g;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Scene, renderer, lights, controls                                  */
+/* ------------------------------------------------------------------ */
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.95;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;   // procedural studio reflections
+scene.environmentIntensity = 0.45;
+
+const camera = new THREE.PerspectiveCamera(32, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(6.2, 4.3, 10.6);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 2.45, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.07;
+controls.minDistance = 5;
+controls.maxDistance = 16;
+controls.maxPolarAngle = Math.PI * 0.53;
+controls.autoRotateSpeed = 1.2;
+controls.update();
+
+// Lights: ambient + key + fill + rim
+scene.add(new THREE.HemisphereLight(0xdfe6ff, 0x2a2622, 0.55));
+
+const key = new THREE.DirectionalLight(0xfff1e0, 2.2);
+key.position.set(4.5, 9, 6.5);
+key.castShadow = true;
+key.shadow.mapSize.set(4096, 4096);
+Object.assign(key.shadow.camera, { left: -5, right: 5, top: 7, bottom: -3, near: 1, far: 30 });
+key.shadow.bias = -0.0004;
+key.shadow.normalBias = 0.025;
+key.shadow.radius = 3;
+scene.add(key);
+
+const fill = new THREE.DirectionalLight(0x8fa8ff, 0.8);
+fill.position.set(-6, 3.5, 4);
+scene.add(fill);
+
+const rim = new THREE.SpotLight(0xffd9b0, 190, 30, 0.6, 0.6, 1.6);
+rim.position.set(-3.5, 6.5, -7);
+rim.target.position.set(0, 2.6, 0);
+scene.add(rim, rim.target);
+
+const rim2 = new THREE.SpotLight(0x9fc0ff, 110, 30, 0.6, 0.6, 1.6);
+rim2.position.set(5, 5, -6);
+rim2.target.position.set(0, 2.6, 0);
+scene.add(rim2, rim2.target);
+
+/* ------------------------------------------------------------------ */
+/*  Display base                                                       */
+/* ------------------------------------------------------------------ */
+{
+  const base = new THREE.Group();
+  add(base, new THREE.CylinderGeometry(3.3, 3.4, 0.22, 96), M.base, 0, -0.11, 0);
+  add(base, new THREE.CylinderGeometry(3.42, 3.42, 0.05, 96), M.armorGloss, 0, -0.21, 0);
+  const ring = add(base, new THREE.TorusGeometry(2.95, 0.018, 8, 128), M.tan, 0, 0.002, 0, Math.PI / 2);
+  ring.scale.z = 0.4;
+  const ring2 = add(base, new THREE.TorusGeometry(2.55, 0.01, 8, 128), M.tan, 0, 0.002, 0, Math.PI / 2);
+  ring2.scale.z = 0.4;
+  // small tick marks around the outer ring
+  for (let i = 0; i < 48; i++) {
+    const a = (i / 48) * Math.PI * 2;
+    add(base, new THREE.BoxGeometry(0.03, 0.006, i % 4 === 0 ? 0.22 : 0.1), M.tan, Math.cos(a) * 3.12, 0.003, Math.sin(a) * 3.12, 0, -a + Math.PI / 2);
+  }
+  base.traverse(o => { if (o.isMesh) { o.receiveShadow = true; } });
+  scene.add(base);
+}
+
+/* ====================================================================== */
+/*  CHARACTER                                                             */
+/* ====================================================================== */
+const character = new THREE.Group();
+scene.add(character);
+
+/** Group whose origin is the pivot; `content` is offset so children use world-space coordinates. */
+function makePivot(parent, px, py, pz) {
+  const pivot = new THREE.Group(); pivot.position.set(px, py, pz);
+  const content = new THREE.Group(); content.position.set(-px, -py, -pz);
+  pivot.add(content); parent.add(pivot);
+  return { pivot, content };
+}
+
+/* ------------------------------------------------------------------ */
+/*  SKULL                                                              */
+/* ------------------------------------------------------------------ */
+const SK = V3(0, 3.6, 0);   // skull centre
+
+/** Radial distance of the skull surface in unit direction (dx,dy,dz) from SK. */
+function skullR(dx, dy, dz) {
+  let rx = 0.79, ry = dy > 0 ? 0.71 : 0.61, rz = 0.75;
+  const low = smoothstep(dy, 0.05, -0.45);           // 0 above, 1 in the jaw
+  const t = Math.max(0, -dy);
+  rx *= 1 - 0.1 * t * t; rz *= 1 - 0.06 * t * t;
+  const n = 2 + 0.75 * low;                          // boxier jaw, rounder cranium
+  let R = 1 / Math.pow((Math.abs(dx) / rx) ** n + (Math.abs(dy) / ry) ** n + (Math.abs(dz) / rz) ** n, 1 / n);
+  // brow ridge + temple dents for a more anatomical silhouette
+  const brow = Math.max(0, dz) ** 2 * Math.exp(-(((dy - 0.2) / 0.13) ** 2));
+  const temple = Math.exp(-(((Math.abs(dx) - 0.95) / 0.22) ** 2)) * Math.exp(-(((dy - 0.02) / 0.3) ** 2));
+  return R * (1 + 0.05 * brow - 0.035 * temple);
+}
+
+/** Front surface z of the skull at world (x, y) — null outside the silhouette. */
+function skullZ(x, y) {
+  const px = x - SK.x, py = y - SK.y;
+  const inside = z => { const l = Math.hypot(px, py, z); return l < skullR(px / l, py / l, z / l); };
+  if (!inside(0.0001)) return null;
+  let lo = 0, hi = 1.4;
+  for (let i = 0; i < 36; i++) { const m = (lo + hi) / 2; if (inside(m)) lo = m; else hi = m; }
+  return SK.z + lo;
+}
+
+/** Bend a locally-authored geometry (x,y around cx,cy) onto the skull front. */
+function wrapOnSkull(geo, cx, cy, zBase = 0) {
+  const p = geo.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const wx = cx + p.getX(i), wy = cy + p.getY(i);
+    const z = skullZ(wx, wy) ?? 0.3;
+    p.setXYZ(i, wx, wy, z + p.getZ(i) + zBase);
+  }
+  p.needsUpdate = true;
+  return geo;
+}
+
+function skullDir(az, pol) { return V3(Math.sin(pol) * Math.sin(az), Math.cos(pol), Math.sin(pol) * Math.cos(az)); }
+function skullPoint(az, pol, lift = 0) {
+  const d = skullDir(az, pol);
+  return V3().copy(d).multiplyScalar(skullR(d.x, d.y, d.z) + lift).add(SK);
+}
+
+function buildSkull(head) {
+  // Cranium: unit sphere pushed onto the radial skull function
+  const sg = new THREE.SphereGeometry(1, 128, 96);
+  const p = sg.attributes.position, v = V3();
+  for (let i = 0; i < p.count; i++) {
+    v.fromBufferAttribute(p, i).normalize();
+    const R = skullR(v.x, v.y, v.z);
+    p.setXYZ(i, SK.x + v.x * R, SK.y + v.y * R, SK.z + v.z * R);
+  }
+  add(head, smooth(sg), M.bone);
+
+  // Cheekbones
+  for (const s of [-1, 1]) {
+    const z = skullZ(s * 0.5, 3.4);
+    const m = add(head, new THREE.SphereGeometry(0.14, 24, 16), M.bone, s * 0.5, 3.4, z - 0.04);
+    m.scale.set(1.15, 0.7, 0.9); m.rotation.y = s * 0.5;
+  }
+
+  // ---- Eye sockets: raised bone rim + recessed black fill (angry slant)
+  const eyeOutline = [[-0.19, 0.0], [-0.02, 0.1], [0.11, 0.17], [0.21, 0.155], [0.23, 0.03], [0.15, -0.1], [0.01, -0.165], [-0.12, -0.13], [-0.2, -0.06]];
+  const curvePts = (pts, n = 56, mirror = 1) => {
+    const c = new THREE.CatmullRomCurve3(pts.map(q => V3(q[0] * mirror, q[1], 0)), true, 'centripetal');
+    return c.getSpacedPoints(n).slice(0, -1).map(q => V2(q.x, q.y));
+  };
+  const radialFill = (pts, rings = 8) => {
+    const c = pts.reduce((a, q) => a.add(q), V2()).divideScalar(pts.length), n = pts.length, pos = [c.x, c.y, 0], idx = [];
+    for (let r = 1; r <= rings; r++) for (let i = 0; i < n; i++) pos.push(c.x + (pts[i].x - c.x) * r / rings, c.y + (pts[i].y - c.y) * r / rings, 0);
+    for (let i = 0; i < n; i++) idx.push(0, 1 + i, 1 + (i + 1) % n);
+    for (let r = 1; r < rings; r++) for (let i = 0; i < n; i++) {
+      const a = 1 + (r - 1) * n + i, b = 1 + (r - 1) * n + (i + 1) % n, c2 = 1 + r * n + i, d = 1 + r * n + (i + 1) % n;
+      idx.push(a, c2, b, b, c2, d);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setIndex(idx);
+    return g;
+  };
+  const socket = (pts, cx, cy, rimScale, recess = 0.02) => {
+    const c = pts.reduce((a, q) => a.add(q), V2()).divideScalar(pts.length);
+    const outer = pts.map(q => V2(c.x + (q.x - c.x) * rimScale, c.y + (q.y - c.y) * rimScale));
+    const shape = new THREE.Shape(outer);
+    shape.holes.push(new THREE.Path(pts));
+    let frame = new THREE.ExtrudeGeometry(shape, { depth: 0.02, bevelEnabled: true, bevelThickness: 0.022, bevelSize: 0.02, bevelSegments: 4, curveSegments: 1 });
+    wrapOnSkull(frame, cx, cy, -0.012);
+    add(head, smooth(frame), M.bone);
+    const fill = wrapOnSkull(radialFill(pts), cx, cy, 0.016 - recess * 0.2);
+    add(head, fill, M.void).userData.noShadow = true;
+  };
+  for (const s of [-1, 1]) socket(curvePts(eyeOutline, 56, s), s * 0.3, 3.7, 1.32);
+
+  // ---- Nasal cavity (inverted heart)
+  const nose = curvePts([[0, 0.07], [0.045, 0.02], [0.07, -0.05], [0.03, -0.08], [0, -0.05], [-0.03, -0.08], [-0.07, -0.05], [-0.045, 0.02]], 40);
+  socket(nose, 0, 3.43, 1.4, 0.015);
+
+  // ---- Teeth + dark mouth line (upper and lower rows)
+  const mouthLine = wrapOnSkull(new THREE.BoxGeometry(0.66, 0.02, 0.02, 32, 1, 1), 0, 3.155, -0.004);
+  add(head, mouthLine, M.void);
+  const rows = [{ y: 3.225, h: 0.115, n: 9, span: 0.32 }, { y: 3.085, h: 0.1, n: 7, span: 0.245 }];
+  for (const row of rows) {
+    const step = (2 * row.span) / (row.n - 1);
+    add(head, wrapOnSkull(new THREE.BoxGeometry(row.span * 2 + step, row.h * 1.06, 0.03, 32, 1, 1), 0, row.y, -0.012), M.void);
+    for (let i = 0; i < row.n; i++) {
+      const x = -row.span + i * step, z = skullZ(x, row.y) ?? 0.5;
+      const dz = ((skullZ(x + 0.01, row.y) ?? z) - (skullZ(x - 0.01, row.y) ?? z)) / 0.02;
+      const tooth = add(head, new RoundedBoxGeometry(step * 0.82, row.h * (0.93 + rand() * 0.07), 0.07, 3, 0.014), M.tooth, x, row.y, z - 0.012, 0, Math.atan2(-dz, 1));
+      tooth.rotation.z = (rand() - 0.5) * 0.04;
+    }
+  }
+
+  // ---- Cracks: jittered tubes hugging the surface
+  const crack = (az, pol, steps, len, jitter, drift, r = 0.0075) => {
+    const pts = [];
+    for (let i = 0; i < steps; i++) {
+      pts.push(skullPoint(az, pol, 0.003));
+      az += drift + (rand() - 0.5) * jitter; pol += len * (0.6 + rand() * 0.8);
+    }
+    const g = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), steps * 6, r, 5, false);
+    add(head, g, M.crack);
+  };
+  crack(-1.2, 0.98, 9, 0.05, 0.16, -0.02);   // left temple, running toward eye
+  crack(-1.3, 1.08, 4, 0.05, 0.3, 0.06, 0.005);
+  crack(1.05, 1.0, 8, 0.055, 0.15, 0.04);    // right temple
+  crack(1.2, 1.08, 4, 0.04, 0.3, -0.08, 0.005);
+  crack(0.45, 0.82, 5, 0.05, 0.25, 0.1, 0.006);      // forehead nick
+  crack(-2.2, 1.05, 8, 0.05, 0.2, -0.05);     // back left
+  crack(2.0, 1.1, 7, 0.055, 0.2, 0.05);       // back right
+  crack(2.9, 0.9, 7, 0.06, 0.2, 0.05);        // back of head
+}
+
+/* ------------------------------------------------------------------ */
+/*  KASA HAT + HORNS                                                   */
+/* ------------------------------------------------------------------ */
+function buildHat(head) {
+  const R = 1.38, H = 0.86, N = 72;
+  const outer = s => V2(s * R, H * Math.pow(1 - s, 1.15) - 0.05 * s ** 4);
+  const thick = s => 0.05 + 0.025 * (1 - s);
+  const prof = [];
+  for (let k = N; k >= 0; k--) prof.push(outer(k / N));                        // rim → apex (outer skin)
+  for (let k = 0; k <= N; k++) { const s = k / N, o = outer(s); prof.push(V2(s * R * 0.985, o.y - thick(s))); } // apex → rim (inner skin)
+  const rimO = outer(1), rimI = V2(R * 0.985, rimO.y - thick(1));
+  prof.push(V2(R + 0.012, (rimO.y + rimI.y) / 2));
+  prof.push(rimO.clone());
+
+  const lg = new THREE.LatheGeometry(prof, 200);
+  // Procedural straw-weave bumps on the outer skin
+  const p = lg.attributes.position, nrm = lg.attributes.normal, per = prof.length;
+  for (let i = 0; i <= 200; i++) for (let j = 0; j <= N; j++) {
+    const k = i * per + j;
+    const x = p.getX(k), z = p.getZ(k), r = Math.hypot(x, z), th = Math.atan2(z, x), s = r / R;
+    const mask = smoothstep(s, 0.03, 0.12);
+    const d = mask * (0.007 * Math.abs(Math.sin(r * 52)) + 0.004 * Math.sin(th * 110) * (0.4 + s) + 0.002 * Math.sin(r * 130 + th * 40));
+    p.setXYZ(k, x + nrm.getX(k) * d, p.getY(k) + nrm.getY(k) * d, z + nrm.getZ(k) * d);
+  }
+  const hat = new THREE.Group();
+  hat.position.y = 4.0;
+  add(hat, smooth(lg), M.hat);
+  // Rim binding + finial
+  const rim = add(hat, new THREE.TorusGeometry(R + 0.008, 0.028, 12, 160), M.armorGloss, 0, rimO.y - 0.02, 0, Math.PI / 2);
+  rim.scale.z = 0.8;
+  add(hat, new THREE.ConeGeometry(0.06, 0.12, 20), M.armorGloss, 0, H + 0.02, 0);
+  add(hat, new THREE.SphereGeometry(0.038, 16, 12), M.tan, 0, H + 0.09, 0);
+  // Concentric weave ribbing rings (extra relief)
+  for (const s of [0.28, 0.42, 0.56, 0.7, 0.84]) {
+    const o = outer(s);
+    const t = add(hat, new THREE.TorusGeometry(o.x, 0.007, 6, 120), M.hat, 0, o.y + 0.008, 0, Math.PI / 2);
+    t.scale.z = 1.0;
+  }
+  head.add(hat);
+
+  // Horns: tapered, ridged, curving outward
+  for (const s of [-1, 1]) {
+    const base = outer(0.41 / R);
+    const pts = [V3(0, -0.06, 0), V3(0.005 * s, 0.1, 0), V3(0.03 * s, 0.24, -0.005), V3(0.08 * s, 0.4, -0.02), V3(0.17 * s, 0.52, -0.04)];
+    const g = taperedTube(pts, t => Math.max(0, 0.092 * Math.pow(1 - t, 0.8) * (1 + 0.06 * Math.sin(t * 46)) * (t > 0.96 ? (1 - t) / 0.04 : 1)));
+    const horn = add(hat, g, M.horn, s * 0.41, base.y, 0.02);
+    // gold collar at the base
+    add(hat, new THREE.TorusGeometry(0.085, 0.014, 8, 24), M.tan, s * 0.41, base.y + 0.045, 0.02, Math.PI / 2);
+    add(hat, new THREE.CylinderGeometry(0.095, 0.11, 0.05, 20), M.armorGloss, s * 0.41, base.y - 0.005, 0.02);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coat profile helpers                                               */
+/* ------------------------------------------------------------------ */
+const COAT = [
+  { y: 1.08, rx: 0.92, rz: 0.58, p: 3.0 },
+  { y: 1.45, rx: 0.82, rz: 0.54, p: 3.0 },
+  { y: 1.80, rx: 0.69, rz: 0.50, p: 2.8 },
+  { y: 2.25, rx: 0.65, rz: 0.49, p: 2.6 },
+  { y: 2.70, rx: 0.67, rz: 0.50, p: 2.5 },
+  { y: 2.95, rx: 0.55, rz: 0.42, p: 2.4 },
+  { y: 3.06, rx: 0.38, rz: 0.33, p: 2.2 },
+];
+function coatAt(y) {
+  y = THREE.MathUtils.clamp(y, COAT[0].y, COAT[COAT.length - 1].y);
+  for (let i = 0; i < COAT.length - 1; i++) {
+    const a = COAT[i], b = COAT[i + 1];
+    if (y <= b.y) { const t = (y - a.y) / (b.y - a.y); return { rx: a.rx + (b.rx - a.rx) * t, rz: a.rz + (b.rz - a.rz) * t, p: a.p + (b.p - a.p) * t }; }
+  }
+}
+/** Point + facing on the coat surface at height y and angle (0 = front, +x positive). */
+function onCoat(y, ang, off = 0) {
+  const L = coatAt(y), c = Math.cos(ang), s = Math.sin(ang), e = 2 / L.p;
+  const x = L.rx * Math.sign(s) * Math.abs(s) ** e, z = L.rz * Math.sign(c) * Math.abs(c) ** e;
+  let nx = Math.sign(x) * Math.abs(x / L.rx) ** (L.p - 1) / L.rx, nz = Math.sign(z) * Math.abs(z / L.rz) ** (L.p - 1) / L.rz;
+  const l = Math.hypot(nx, nz) || 1; nx /= l; nz /= l;
+  return { pos: V3(x + nx * off, y, z + nz * off), ry: Math.atan2(nx, nz) };
+}
+/** Belt-like band hugging the coat. */
+function coatBand(parent, y0, y1, grow, mat, seg = 72) {
+  const lv = [];
+  for (let i = 0; i <= 4; i++) { const y = y0 + (y1 - y0) * i / 4, L = coatAt(y); lv.push({ y, rx: L.rx + grow, rz: L.rz + grow, p: L.p }); }
+  return add(parent, loft(lv, { seg }), mat);
+}
+
+/* ------------------------------------------------------------------ */
+/*  TORSO (coat, vest, collar, belt, katana)                           */
+/* ------------------------------------------------------------------ */
+function buildTorso(torso) {
+  // Black long coat body (matte)
+  add(torso, loft(COAT, { seg: 80 }), M.armorMatte);
+
+  // Neck / undershirt
+  add(torso, new THREE.CylinderGeometry(0.3, 0.34, 0.5, 32), M.cloth, 0, 3.05, 0);
+
+  // ----- High collar / neck guard (open at the front, tall on the sides and back)
+  const collarProf = [V2(0.44, 2.94), V2(0.64, 3.32), V2(0.7, 3.32), V2(0.52, 2.92), V2(0.44, 2.94)];
+  const collar = add(torso, new THREE.LatheGeometry(collarProf, 48, 0.75, Math.PI * 2 - 1.5), M.armor);
+  collar.material = M.armor.clone(); collar.material.side = THREE.DoubleSide;
+  collar.scale.set(1.05, 1, 0.95);
+  const collarTrim = add(torso, new THREE.LatheGeometry([V2(0.635, 3.315), V2(0.705, 3.315), V2(0.705, 3.345), V2(0.635, 3.345), V2(0.635, 3.315)], 48, 0.75, Math.PI * 2 - 1.5), M.tan);
+  collarTrim.material = M.tan.clone(); collarTrim.material.side = THREE.DoubleSide;
+  collarTrim.scale.set(1.05, 1, 0.95);
+  // Collar stitching studs
+  for (let i = 0; i < 10; i++) {
+    const a = 0.9 + (i / 9) * (Math.PI * 2 - 1.8), r = 0.58;
+    rivet(torso, Math.sin(a) * r * 1.05, 3.12, Math.cos(a) * r * 0.95, 0.014);
+  }
+
+  // ----- Front chest plate (V-neck cut)
+  const zf = coatAt(2.5).rz;
+  const plateShape = new THREE.Shape();
+  [[-0.5, -0.5], [0.5, -0.5], [0.52, 0.3], [0.44, 0.47], [0.2, 0.47], [0, 0.22], [-0.2, 0.47], [-0.44, 0.47], [-0.52, 0.3]]
+    .forEach(([x, y], i) => i ? plateShape.lineTo(x, y) : plateShape.moveTo(x, y));
+  const plateGeo = new THREE.ExtrudeGeometry(plateShape, { depth: 0.05, bevelEnabled: true, bevelThickness: 0.02, bevelSize: 0.02, bevelSegments: 3 });
+  add(torso, plateGeo, M.armor, 0, 2.52, zf - 0.02);
+  // chest plate inner border line
+  const inner = new THREE.Shape();
+  [[-0.42, -0.42], [0.42, -0.42], [0.44, 0.26], [0.38, 0.38], [0.2, 0.38], [0, 0.15], [-0.2, 0.38], [-0.38, 0.38], [-0.44, 0.26]]
+    .forEach(([x, y], i) => i ? inner.lineTo(x, y) : inner.moveTo(x, y));
+  const innerGeo = new THREE.ExtrudeGeometry(inner, { depth: 0.01, bevelEnabled: true, bevelThickness: 0.008, bevelSize: 0.008, bevelSegments: 2 });
+  add(torso, innerGeo, M.armorGloss, 0, 2.52, zf + 0.045);
+
+  // Center spine plate + ribs
+  add(torso, new RoundedBoxGeometry(0.2, 0.62, 0.05, 3, 0.02), M.armorMatte, 0, 2.3, zf + 0.09);
+  for (let i = 0; i < 5; i++) add(torso, new RoundedBoxGeometry(0.22, 0.03, 0.055, 2, 0.01), M.armorGloss, 0, 2.06 + i * 0.12, zf + 0.1);
+  vents(torso, 3, 0.09, 0.012, 0.03, 0, 2.62, zf + 0.06);
+
+  // Chest pouches and diagonal harness straps with orange/tan accents
+  for (const s of [-1, 1]) {
+    pouch(torso, 0.24, 0.26, 0.09, s * 0.33, 2.28, zf + 0.09, s * 0.12);
+    pouch(torso, 0.15, 0.17, 0.07, s * 0.35, 2.62, zf + 0.085, s * 0.14, M.armorMatte);
+    const a = V3(s * 0.56, 2.94, zf - 0.02), b = V3(s * 0.17, 2.5, zf + 0.1);
+    strap(torso, a, b, 0.075, 0.03, M.armorMatte);
+    buckle(torso, s * 0.36, 2.72, zf + 0.09, 0.1, 0.075, s * 0.85);
+    // tan diagonal strips (as in the reference)
+    strap(torso, V3(s * 0.5, 2.36, zf + 0.055), V3(s * 0.36, 2.2, zf + 0.09), 0.028, 0.012, M.tan);
+    // rivet clusters on plate corners
+    for (const [rx, ry] of [[0.45, 2.15], [0.45, 2.85], [0.2, 2.16]]) rivet(torso, s * rx, ry, zf + 0.05);
+  }
+  // orange belt-line accents across the front
+  add(torso, new RoundedBoxGeometry(0.68, 0.028, 0.04, 2, 0.01), M.tan, 0, 1.99, zf + 0.06);
+  add(torso, new RoundedBoxGeometry(0.62, 0.022, 0.04, 2, 0.01), M.leather, 0, 1.93, zf + 0.06);
+
+  // ----- Waist belt with orange edges
+  coatBand(torso, 1.72, 1.9, 0.035, M.armorGloss);
+  coatBand(torso, 1.885, 1.905, 0.045, M.tan);
+  coatBand(torso, 1.715, 1.735, 0.045, M.tan);
+  // belt loops / studs around the belt
+  for (let i = -6; i <= 6; i++) {
+    const a = onCoat(1.81, i * 0.26, 0.06);
+    if (Math.abs(i) < 1) continue;
+    add(torso, new RoundedBoxGeometry(0.09, 0.14, 0.03, 2, 0.008), M.armorMatte, a.pos.x, 1.81, a.pos.z, 0, a.ry);
+    const r = onCoat(1.81, i * 0.26, 0.078);
+    rivet(torso, r.pos.x, 1.84, r.pos.z, 0.012);
+  }
+
+  // ----- Gate-shaped belt buckle (matches the arch in the reference)
+  const gate = new THREE.Shape();
+  gate.moveTo(-0.34, 0.3); gate.lineTo(0.34, 0.3); gate.lineTo(0.3, -0.3); gate.lineTo(-0.3, -0.3); gate.closePath();
+  const arch = new THREE.Path();
+  arch.moveTo(-0.13, -0.3); arch.lineTo(-0.13, -0.05); arch.absarc(0, -0.05, 0.13, Math.PI, 0, true); arch.lineTo(0.13, -0.3); arch.lineTo(-0.13, -0.3);
+  gate.holes.push(arch);
+  const zg = coatAt(1.5).rz;
+  add(torso, new THREE.ExtrudeGeometry(gate, { depth: 0.05, bevelEnabled: true, bevelThickness: 0.02, bevelSize: 0.02, bevelSegments: 3, curveSegments: 20 }), M.armorGloss, 0, 1.5, zg - 0.01);
+  // dark cavity behind the arch and tan header bar
+  add(torso, new THREE.BoxGeometry(0.26, 0.3, 0.02), M.void, 0, 1.36, zg + 0.01);
+  add(torso, new RoundedBoxGeometry(0.66, 0.035, 0.05, 2, 0.01), M.tan, 0, 1.79, zg + 0.09);
+  add(torso, new RoundedBoxGeometry(0.4, 0.02, 0.05, 2, 0.008), M.tan, 0, 1.68, zg + 0.09);
+  for (const s of [-1, 1]) { rivet(torso, s * 0.26, 1.72, zg + 0.1, 0.018); rivet(torso, s * 0.24, 1.3, zg + 0.1, 0.018); }
+
+  // ----- Hem plates (front + back), angular tactical skirt panels
+  const hem = [-1.15, -0.72, -0.4, 0.4, 0.72, 1.15];
+  hem.forEach((ang, i) => {
+    const a = onCoat(1.36, ang, 0.03);
+    const g = new THREE.Group(); g.position.copy(a.pos); g.rotation.y = a.ry;
+    const w = Math.abs(ang) > 1 ? 0.3 : 0.26;
+    add(g, new RoundedBoxGeometry(w, 0.42, 0.055, 3, 0.018), M.armor);
+    add(g, new RoundedBoxGeometry(w * 0.72, 0.3, 0.06, 3, 0.012), M.armorGloss, 0, -0.02, 0.008);
+    add(g, new RoundedBoxGeometry(w * 0.9, 0.018, 0.062, 2, 0.006), M.tan, 0, 0.17, 0.004);
+    rivet(g, -w * 0.38, -0.17, 0.03, 0.013); rivet(g, w * 0.38, -0.17, 0.03, 0.013);
+    if (i % 2 === 0) pouch(g, 0.16, 0.16, 0.06, 0, -0.02, 0.05, 0, M.armorMatte);
+    torso.add(g);
+  });
+  // Coat side panels: chunky mecha-style rectangles with recessed detail
+  for (const s of [-1, 1]) {
+    for (const [y, h] of [[1.32, 0.42], [1.66, 0.28]]) {
+      const a = onCoat(y, s * 1.5, 0.04);
+      const g = new THREE.Group(); g.position.copy(a.pos); g.rotation.y = a.ry;
+      add(g, new RoundedBoxGeometry(0.44, h, 0.06, 3, 0.02), M.armor);
+      add(g, new RoundedBoxGeometry(0.32, h * 0.62, 0.07, 3, 0.012), M.armorGloss, 0, 0, 0.005);
+      vents(g, 4, 0.2, 0.012, 0.035, 0, h * 0.02, 0.045);
+      for (const sx of [-1, 1]) rivet(g, sx * 0.19, h * 0.4, 0.035, 0.013);
+      add(g, new RoundedBoxGeometry(0.4, 0.016, 0.065, 2, 0.006), M.tan, 0, -h * 0.44, 0.004);
+      torso.add(g);
+    }
+  }
+
+  // ----- Back armour: plate, spine ridge, vents
+  const zb = -coatAt(2.4).rz;
+  add(torso, new RoundedBoxGeometry(0.98, 0.95, 0.08, 4, 0.03), M.armor, 0, 2.42, zb - 0.02);
+  add(torso, new RoundedBoxGeometry(0.16, 0.85, 0.06, 3, 0.02), M.armorGloss, 0, 2.42, zb - 0.075);
+  for (const s of [-1, 1]) {
+    vents(torso, 5, 0.26, 0.014, 0.05, s * 0.32, 2.5, zb - 0.07, Math.PI);
+    pouch(torso, 0.24, 0.22, 0.08, s * 0.33, 2.05, zb - 0.06, Math.PI);
+  }
+  coatBand(torso, 2.9, 2.96, 0.03, M.armorGloss);
+  // hem back plates
+  for (const a of [Math.PI - 0.5, Math.PI - 0.15, Math.PI + 0.15, Math.PI + 0.5]) {
+    const c = onCoat(1.36, a, 0.03);
+    const g = new THREE.Group(); g.position.copy(c.pos); g.rotation.y = c.ry;
+    add(g, new RoundedBoxGeometry(0.28, 0.42, 0.055, 3, 0.018), M.armor);
+    add(g, new RoundedBoxGeometry(0.2, 0.28, 0.06, 3, 0.012), M.armorGloss, 0, -0.02, 0.008);
+    torso.add(g);
+  }
+
+  // ----- Katana across the back (handle over the shoulder as in the reference)
+  buildKatana(torso);
+}
+
+function buildKatana(parent) {
+  const sword = new THREE.Group();
+  sword.position.set(-0.3, 2.55, -0.7);
+  sword.rotation.z = -(Math.PI / 2 - 0.672);
+  // Saya (scabbard)
+  add(sword, new THREE.CylinderGeometry(0.075, 0.07, 2.25, 20), M.armorGloss, 0, -0.32, 0).scale.z = 0.72;
+  add(sword, new THREE.CylinderGeometry(0.082, 0.082, 0.09, 20), M.tan, 0, 0.78, 0).scale.z = 0.75;          // koiguchi
+  add(sword, new THREE.CylinderGeometry(0.078, 0.078, 0.11, 20), M.tan, 0, -1.4, 0).scale.z = 0.72;           // kojiri collar
+  add(sword, new THREE.SphereGeometry(0.075, 16, 12, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2), M.armorGloss, 0, -1.445, 0).scale.z = 0.72;
+  // Sageo cord wraps
+  for (let i = 0; i < 6; i++) { const t = add(sword, new THREE.TorusGeometry(0.079, 0.011, 6, 20), M.leather, 0, 0.5 - i * 0.042, 0, Math.PI / 2); t.scale.y = 0.72; }
+  // Tsuba
+  const tsuba = add(sword, new THREE.CylinderGeometry(0.17, 0.17, 0.035, 32), M.armorGloss, 0, 0.86, 0);
+  tsuba.scale.z = 0.9;
+  add(sword, new THREE.TorusGeometry(0.17, 0.014, 8, 32), M.tan, 0, 0.86, 0, Math.PI / 2).scale.y = 0.9;
+  for (let i = 0; i < 4; i++) { const a = i * Math.PI / 2 + Math.PI / 4; add(sword, new THREE.SphereGeometry(0.03, 10, 8), M.tan, Math.cos(a) * 0.11, 0.86, Math.sin(a) * 0.1); }
+  // Tsuka (handle) with diamond wrap
+  add(sword, new THREE.CylinderGeometry(0.058, 0.055, 0.62, 16), M.glove, 0, 1.17, 0).scale.z = 0.8;
+  for (let i = 0; i < 9; i++) {
+    const t = add(sword, new THREE.TorusGeometry(0.058, 0.009, 6, 16), M.armorGloss, 0, 0.9 + i * 0.067, 0, Math.PI / 2);
+    t.scale.y = 0.8;
+    add(sword, new THREE.BoxGeometry(0.03, 0.03, 0.012), M.tan, 0, 0.93 + i * 0.067, 0.048, 0, 0, Math.PI / 4).visible = i % 3 === 1;
+  }
+  add(sword, new THREE.CylinderGeometry(0.072, 0.066, 0.06, 16), M.tan, 0, 1.5, 0).scale.z = 0.8;             // kashira
+  add(sword, new THREE.SphereGeometry(0.06, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), M.tan, 0, 1.53, 0).scale.z = 0.8;
+  parent.add(sword);
+}
+
+/* ------------------------------------------------------------------ */
+/*  ARMS                                                               */
+/* ------------------------------------------------------------------ */
+function buildArm(torso, s) {
+  const shoulder = new THREE.Group();
+  shoulder.position.set(s * 0.83, 2.8, 0);
+  torso.add(shoulder);
+
+  // Pauldron: three overlapping lames + accents
+  const pauld = new THREE.Group(); pauld.rotation.z = -s * 0.15; shoulder.add(pauld);
+  [[0.29, 0.3, 0.27, 0.09], [0.19, 0.34, 0.3, 0.1], [0.08, 0.38, 0.33, 0.11]].forEach(([y, rx, rz, h], i) => {
+    add(pauld, armorPlate(rx, rz, h, { p: 4.6, bevel: 0.02 }), i === 0 ? M.armorGloss : M.armor, s * 0.025 * i, y, 0);
+  });
+  add(pauld, armorPlate(0.39, 0.34, 0.016, { p: 4, bevel: 0.006 }), M.tan, s * 0.05, 0.015, 0);
+  add(pauld, new RoundedBoxGeometry(0.2, 0.03, 0.06, 2, 0.01), M.tan, 0, 0.345, 0.11);
+  for (const sx of [-1, 1]) rivet(pauld, sx * 0.11, 0.342, -0.03, 0.018);
+  vents(pauld, 3, 0.12, 0.014, 0.035, s * 0.16, 0.13, 0.33, 0);
+  strap(shoulder, V3(-s * 0.3, 0.3, 0.05), V3(-s * 0.05, 0.55, 0.0), 0.09, 0.03);
+
+  // Upper arm: chunky boxy plates
+  for (let k = 0; k < 3; k++) {
+    const y = -0.14 - 0.165 * k, r = 0.225 - 0.004 * k;
+    add(shoulder, armorPlate(r, r * 0.95, 0.15, { p: 5, bevel: 0.018 }), k % 2 ? M.armor : M.armorGloss, 0, y, 0);
+  }
+  add(shoulder, armorPlate(0.232, 0.222, 0.018, { p: 4.2, bevel: 0.006 }), M.tan, 0, -0.14 - 0.165 * 0.5, 0);
+  for (const sx of [-1, 1]) rivet(shoulder, sx * 0.14, -0.24, 0.2, 0.014);
+
+  // Elbow joint + guard
+  const elbow = new THREE.Group(); elbow.position.set(0, -0.63, 0); shoulder.add(elbow);
+  add(elbow, new THREE.SphereGeometry(0.18, 24, 16), M.armorMatte).scale.set(1, 0.85, 0.95);
+  add(elbow, new RoundedBoxGeometry(0.26, 0.16, 0.07, 3, 0.03), M.armorGloss, 0, 0, -0.19, -0.2);
+
+  // Forearm (bent slightly forward)
+  const fore = new THREE.Group(); fore.rotation.x = -0.28; elbow.add(fore);
+  for (let k = 0; k < 2; k++) {
+    const y = -0.11 - 0.16 * k, r = 0.212 - 0.006 * k;
+    add(fore, armorPlate(r, r * 0.93, 0.15, { p: 5, bevel: 0.018 }), k % 2 ? M.armorGloss : M.armor, 0, y, 0);
+  }
+  add(fore, armorPlate(0.222, 0.205, 0.018, { p: 4.2, bevel: 0.006 }), M.orange, 0, -0.195, 0);
+  pouch(fore, 0.16, 0.18, 0.06, 0, -0.11, 0.2, 0, M.armorMatte);
+  add(fore, armorPlate(0.205, 0.19, 0.15, { p: 5, bevel: 0.018 }), M.armorGloss, 0, -0.44, 0);
+  add(fore, armorPlate(0.212, 0.196, 0.018, { p: 4.6, bevel: 0.006 }), M.tan, 0, -0.53, 0);
+  vents(fore, 3, 0.09, 0.012, 0.03, 0, -0.44, 0.19);
+
+  // Hand: stubby gloved fist
+  const hand = new THREE.Group(); hand.position.set(0, -0.66, 0.02); fore.add(hand);
+  add(hand, new RoundedBoxGeometry(0.19, 0.14, 0.19, 4, 0.05), M.glove);
+  add(hand, new RoundedBoxGeometry(0.18, 0.055, 0.055, 3, 0.02), M.armorGloss, 0, 0.03, 0.095);   // knuckle guard
+  for (let i = 0; i < 4; i++) {
+    const f = add(hand, new THREE.CapsuleGeometry(0.036, 0.055, 4, 10), M.glove, -0.07 + i * 0.047, -0.095, 0.055, -0.45);
+    f.scale.set(1, 1, 1.05);
+  }
+  add(hand, new THREE.CapsuleGeometry(0.036, 0.055, 4, 10), M.glove, -s * 0.1, -0.02, 0.085, -0.3, 0, -s * 0.5);
+}
+
+/* ------------------------------------------------------------------ */
+/*  LEGS + SANDALS                                                     */
+/* ------------------------------------------------------------------ */
+function buildLeg(root, s) {
+  const leg = new THREE.Group(); leg.position.set(s * 0.4, 0, 0); root.add(leg);
+
+  // Pants with gathered folds
+  const rx = [[0.78, 0.235], [0.82, 0.275], [0.88, 0.255], [0.95, 0.29], [1.02, 0.27], [1.09, 0.305], [1.17, 0.29], [1.3, 0.31]];
+  add(leg, loft(rx.map(([y, r]) => ({ y, rx: r, rz: r * 0.95, p: 2.1 })), { seg: 40 }), M.pants);
+  // Ankle cinch (bunched cuff) + sock cuff
+  add(leg, new THREE.TorusGeometry(0.235, 0.048, 10, 40), M.pantsDark, 0, 0.775, 0, Math.PI / 2);
+  // Sock
+  add(leg, loft([{ y: 0.2, rx: 0.2, rz: 0.2 }, { y: 0.3, rx: 0.175, rz: 0.175 }, { y: 0.5, rx: 0.165, rz: 0.165 }, { y: 0.8, rx: 0.175, rz: 0.175 }], { seg: 32 }), M.sock);
+  add(leg, new THREE.TorusGeometry(0.175, 0.03, 8, 32), M.sock, 0, 0.72, 0, Math.PI / 2);
+  add(leg, new THREE.TorusGeometry(0.17, 0.014, 6, 32), M.sock, 0, 0.66, 0, Math.PI / 2);
+
+  // Sandal
+  const foot = new THREE.Group(); foot.position.set(s * 0.02, 0, 0.14); foot.rotation.y = s * 0.1; leg.add(foot);
+  const outline = [[0, -0.36], [0.22, -0.3], [0.31, -0.05], [0.32, 0.2], [0.28, 0.45], [0.16, 0.62], [0, 0.66], [-0.16, 0.62], [-0.28, 0.45], [-0.32, 0.2], [-0.31, -0.05], [-0.22, -0.3]];
+  const solePts = new THREE.CatmullRomCurve3(outline.map(([x, z]) => V3(x, -z, 0)), true, 'centripetal').getSpacedPoints(64).slice(0, -1).map(q => V2(q.x, q.y));
+  const soleGeo = (depth, sc, bt) => { const g = new THREE.ExtrudeGeometry(new THREE.Shape(solePts.map(q => V2(q.x * sc, q.y * sc))), { depth, bevelEnabled: true, bevelThickness: bt, bevelSize: bt, bevelSegments: 2, curveSegments: 1 }); g.rotateX(-Math.PI / 2); return g; };
+  add(foot, soleGeo(0.03, 1.0, 0.01), M.sole, 0, 0.01, 0);           // white outsole
+  add(foot, soleGeo(0.06, 0.985, 0.014), M.sandal, 0, 0.05, 0);      // black footbed
+  // White foot
+  const top = add(foot, new THREE.SphereGeometry(1, 32, 20), M.toe, 0, 0.17, 0.16); top.scale.set(0.265, 0.13, 0.52);
+  const heel = add(foot, new THREE.SphereGeometry(1, 24, 16), M.toe, 0, 0.14, -0.14); heel.scale.set(0.22, 0.11, 0.2);
+  // Toes (big toe on the inner side), thong post between the first two toes
+  const toeR = [0.082, 0.07, 0.064, 0.058, 0.052];
+  toeR.forEach((r, i) => {
+    const x = s * (-0.19 + i * 0.095);
+    const t = add(foot, new THREE.SphereGeometry(r, 16, 12), M.toe, x, 0.115, 0.6 - (x / 0.2) ** 2 * 0.12);
+    t.scale.set(1, 0.85, 1.15);
+  });
+  const postX = s * -0.1425;
+  add(foot, new THREE.CylinderGeometry(0.02, 0.026, 0.13, 10), M.sandal, postX, 0.14, 0.56);
+  const surfaceY = (x, z) => 0.17 + 0.13 * Math.sqrt(Math.max(0, 1 - (x / 0.265) ** 2 - ((z - 0.16) / 0.52) ** 2));
+  for (const sx of [-1, 1]) {
+    const pts = [];
+    for (let i = 0; i <= 8; i++) {
+      const t = i / 8, x = postX + (sx * 0.31 - postX) * t, z = 0.54 - 0.38 * t;
+      pts.push(V3(x, Math.max(0.1, surfaceY(x, z)) + 0.028, z));
+    }
+    add(foot, new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 24, 0.033, 8), M.sandal);
+    add(foot, new THREE.SphereGeometry(0.036, 10, 8), M.tan, sx * 0.3, 0.1, 0.14);   // rivet where strap meets sole
+  }
+  // Ankle strap
+  const ank = add(foot, new THREE.TorusGeometry(0.19, 0.025, 8, 32), M.sandal, 0, 0.26, -0.02, Math.PI / 2);
+  ank.scale.set(1, 0.95, 1);
+}
+
+/* ------------------------------------------------------------------ */
+/*  ASSEMBLY                                                           */
+/* ------------------------------------------------------------------ */
+// Legs & pelvis
+const legs = new THREE.Group(); character.add(legs);
+buildLeg(legs, -1); buildLeg(legs, 1);
+add(legs, loft([{ y: 0.95, rx: 0.68, rz: 0.4, p: 2.6 }, { y: 1.25, rx: 0.72, rz: 0.42, p: 2.6 }], { seg: 40 }), M.pants);
+
+// Torso (breathes)
+const { pivot: torsoPivot, content: torsoC } = makePivot(character, 0, 1.9, 0);
+buildTorso(torsoC);
+const armL = buildArm(torsoC, -1), armR = buildArm(torsoC, 1);
+
+// Head (bobs)
+const { pivot: headPivot, content: headC } = makePivot(character, 0, 3.0, 0);
+buildSkull(headC);
+buildHat(headC);
+
+// Enable shadows on everything
+character.traverse(o => { if (o.isMesh) { o.castShadow = !o.userData.noShadow; o.receiveShadow = true; } });
+
+// Grab the shoulder groups for sway animation
+const shoulders = [];
+torsoC.children.forEach(c => { if (c.isGroup && Math.abs(c.position.x) > 0.75 && c.position.y > 2.7) shoulders.push(c); });
+
+/* ------------------------------------------------------------------ */
+/*  Idle animation                                                     */
+/* ------------------------------------------------------------------ */
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const t = clock.getElapsedTime();
+  const b = Math.sin(t * 1.6);                                   // breathing cycle
+
+  torsoPivot.scale.set(1 + 0.008 * b, 1 + 0.016 * b, 1 + 0.01 * b);
+  torsoPivot.rotation.y = Math.sin(t * 0.45) * 0.015;
+
+  headPivot.position.y = 3.0 + 0.012 * b + 0.008 * Math.sin(t * 3.2);
+  headPivot.rotation.z = Math.sin(t * 0.7) * 0.02;
+  headPivot.rotation.y = Math.sin(t * 0.5) * 0.06;
+  headPivot.rotation.x = Math.sin(t * 1.6 - 0.6) * 0.012;
+
+  shoulders.forEach((sh, i) => {
+    const side = sh.position.x > 0 ? 1 : -1, ph = i * 0.9;
+    sh.rotation.x = Math.sin(t * 1.6 + ph) * 0.03;
+    sh.rotation.z = side * (0.02 + 0.015 * b);
+  });
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+/* ------------------------------------------------------------------ */
+/*  Events                                                             */
+/* ------------------------------------------------------------------ */
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+window.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'r') controls.autoRotate = !controls.autoRotate; });
+window.__ready = true;
+</script>
+</body>
+</html>

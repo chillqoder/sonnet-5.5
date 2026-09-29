@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pedestal Fan — Three.js</title>
+<style>
+  :root {
+    --ink: #e9eff6;
+    --muted: #9aa8b8;
+    --card: rgba(16, 21, 28, 0.62);
+    --line: rgba(255, 255, 255, 0.10);
+    --accent: #5fd0ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    background: radial-gradient(120% 90% at 50% 38%, #5b6b80 0%, #37424f 46%, #1c232c 100%);
+  }
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+
+  .hud {
+    position: fixed; pointer-events: none;
+    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+  }
+  #title { top: 16px; left: 16px; padding: 12px 16px; }
+  #title h1 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: .02em; }
+  #title p { margin: 4px 0 0; font-size: 12px; color: var(--muted); line-height: 1.45; }
+  #title kbd {
+    font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+    padding: 1px 5px; border-radius: 4px; border: 1px solid var(--line); background: rgba(255,255,255,.06);
+  }
+
+  #status {
+    bottom: 16px; left: 16px; padding: 10px 14px;
+    display: flex; gap: 14px; align-items: center; font-size: 12px; letter-spacing: .04em;
+  }
+  #status .item { display: flex; align-items: center; gap: 7px; color: var(--muted); text-transform: uppercase; }
+  #status .item b { color: var(--ink); font-weight: 650; }
+  #status .dot { width: 8px; height: 8px; border-radius: 50%; background: #ff4a3a; box-shadow: 0 0 8px #ff4a3a; transition: .3s; }
+  #status .dot.on { background: #34e08a; box-shadow: 0 0 8px #34e08a; }
+  #status .dot.amber.on { background: #ffb020; box-shadow: 0 0 8px #ffb020; }
+  #status .dot.amber { background: #3a4048; box-shadow: none; }
+
+  #viewBtn {
+    position: fixed; right: 16px; bottom: 16px; cursor: pointer;
+    font: 600 12px inherit; font-family: inherit; letter-spacing: .04em; color: var(--ink);
+    padding: 10px 14px; border-radius: 12px; border: 1px solid var(--line);
+    background: var(--card); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+    transition: border-color .2s, background .2s;
+  }
+  #viewBtn:hover { border-color: var(--accent); background: rgba(30, 40, 52, .75); }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 74px; transform: translate(-50%, 8px);
+    padding: 9px 16px; border-radius: 999px; font-size: 13px;
+    background: rgba(12, 16, 22, .82); border: 1px solid var(--line);
+    opacity: 0; pointer-events: none; transition: opacity .25s, transform .25s;
+  }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+  @media (max-width: 640px) {
+    #title p { display: none; }
+    #status { gap: 9px; font-size: 11px; right: 16px; justify-content: space-between; bottom: 64px; }
+    #viewBtn { left: 16px; right: 16px; bottom: 16px; }
+    #toast { bottom: 118px; }
+  }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+
+<div class="hud" id="title">
+  <h1>Pedestal Fan</h1>
+  <p>Drag to orbit · scroll to zoom · click the panel buttons<br>
+     Keys: <kbd>P</kbd> power · <kbd>S</kbd> speed · <kbd>O</kbd> oscillation</p>
+</div>
+
+<div class="hud" id="status">
+  <div class="item"><span class="dot" id="stPower"></span><b id="stPowerTxt">Off</b></div>
+  <div class="item">Speed <b id="stSpeed">—</b></div>
+  <div class="item"><span class="dot amber" id="stOsc"></span>Osc <b id="stOscTxt">Off</b></div>
+</div>
+
+<button id="viewBtn" type="button">Control panel view</button>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+/* ------------------------------------------------------------------ *
+ *  Renderer / scene / camera
+ * ------------------------------------------------------------------ */
+const stage = document.getElementById('stage');
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(stage.clientWidth, stage.clientHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+stage.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+const camera = new THREE.PerspectiveCamera(38, stage.clientWidth / stage.clientHeight, 0.1, 100);
+const OVERVIEW = { pos: new THREE.Vector3(3.0, 4.3, 4.6), target: new THREE.Vector3(0, 1.55, 0) };
+const PANEL    = { pos: new THREE.Vector3(0.22, 3.95, 1.55), target: new THREE.Vector3(0, 2.4, -0.25) };
+camera.position.copy(OVERVIEW.pos);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.copy(OVERVIEW.target);
+controls.enableDamping = true;
+controls.dampingFactor = 0.07;
+controls.minDistance = 1.2;
+controls.maxDistance = 10;
+controls.maxPolarAngle = Math.PI * 0.495;
+controls.update();
+
+/* ------------------------------------------------------------------ *
+ *  Lighting
+ * ------------------------------------------------------------------ */
+scene.add(new THREE.HemisphereLight(0xdfe9ff, 0x2a303a, 0.55));
+
+const key = new THREE.DirectionalLight(0xfff1e0, 2.4);
+key.position.set(4.5, 7.5, 5);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.camera.left = -3.2; key.shadow.camera.right = 3.2;
+key.shadow.camera.top = 3.6;   key.shadow.camera.bottom = -3.2;
+key.shadow.camera.near = 1;    key.shadow.camera.far = 20;
+key.shadow.bias = -0.0003;
+key.shadow.normalBias = 0.025;
+key.shadow.radius = 4;
+scene.add(key);
+
+const fill = new THREE.DirectionalLight(0xb6cdff, 0.7);
+fill.position.set(-5, 3, 3);
+scene.add(fill);
+
+const rim = new THREE.DirectionalLight(0xffffff, 1.1);
+rim.position.set(-2, 4, -6);
+scene.add(rim);
+
+/* ------------------------------------------------------------------ *
+ *  Helpers
+ * ------------------------------------------------------------------ */
+function radialTexture(stops, size = 256) {
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  stops.forEach(([o, col]) => grad.addColorStop(o, col));
+  g.fillStyle = grad;
+  g.fillRect(0, 0, size, size);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+function mesh(geo, mat, { cast = true, receive = false } = {}) {
+  const m = new THREE.Mesh(geo, mat);
+  m.castShadow = cast;
+  m.receiveShadow = receive;
+  return m;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Materials
+ * ------------------------------------------------------------------ */
+const M = {
+  chrome:   new THREE.MeshStandardMaterial({ color: 0xf2f4f7, metalness: 1, roughness: 0.12, envMapIntensity: 1.25 }),
+  satin:    new THREE.MeshStandardMaterial({ color: 0xc9ced6, metalness: 1, roughness: 0.32, envMapIntensity: 1.1 }),
+  baseDark: new THREE.MeshPhysicalMaterial({ color: 0x14171b, roughness: 0.38, metalness: 0.1, clearcoat: 1, clearcoatRoughness: 0.18 }),
+  plastic:  new THREE.MeshPhysicalMaterial({ color: 0x23272d, roughness: 0.45, metalness: 0.05, clearcoat: 0.5, clearcoatRoughness: 0.3 }),
+  housing:  new THREE.MeshPhysicalMaterial({ color: 0xeceff3, roughness: 0.3, metalness: 0.0, clearcoat: 1, clearcoatRoughness: 0.12 }),
+  pod:      new THREE.MeshPhysicalMaterial({ color: 0x0b0d10, roughness: 0.28, metalness: 0.0, clearcoat: 1, clearcoatRoughness: 0.1 }),
+  blade:    new THREE.MeshPhysicalMaterial({ color: 0xbfdcf2, roughness: 0.28, metalness: 0.0, clearcoat: 0.7, clearcoatRoughness: 0.2, side: THREE.DoubleSide }),
+  hub:      new THREE.MeshStandardMaterial({ color: 0xd9dde3, metalness: 1, roughness: 0.22 }),
+};
+M.blade.shadowSide = THREE.DoubleSide;
+
+/* ------------------------------------------------------------------ *
+ *  Floor: soft stage glow, contact shadow, shadow catcher
+ * ------------------------------------------------------------------ */
+{
+  const glow = new THREE.Mesh(
+    new THREE.CircleGeometry(4.2, 64),
+    new THREE.MeshBasicMaterial({
+      map: radialTexture([[0, 'rgba(255,255,255,0.20)'], [0.55, 'rgba(255,255,255,0.07)'], [1, 'rgba(255,255,255,0)']]),
+      transparent: true, depthWrite: false, toneMapped: false,
+    })
+  );
+  glow.rotation.x = -Math.PI / 2; glow.position.y = 0.001; glow.renderOrder = 1;
+  scene.add(glow);
+
+  const contact = new THREE.Mesh(
+    new THREE.CircleGeometry(1.25, 48),
+    new THREE.MeshBasicMaterial({
+      map: radialTexture([[0, 'rgba(0,0,0,0.62)'], [0.55, 'rgba(0,0,0,0.38)'], [0.8, 'rgba(0,0,0,0.10)'], [1, 'rgba(0,0,0,0)']]),
+      transparent: true, depthWrite: false, toneMapped: false,
+    })
+  );
+  contact.rotation.x = -Math.PI / 2; contact.position.y = 0.002; contact.renderOrder = 2;
+  scene.add(contact);
+
+  const catcher = new THREE.Mesh(
+    new THREE.PlaneGeometry(40, 40),
+    new THREE.ShadowMaterial({ opacity: 0.32, depthWrite: false })
+  );
+  catcher.rotation.x = -Math.PI / 2; catcher.position.y = 0.003; catcher.renderOrder = 3;
+  catcher.receiveShadow = true;
+  scene.add(catcher);
+}
+
+/* ------------------------------------------------------------------ *
+ *  Stand: rounded dark base, telescopic metallic pole
+ * ------------------------------------------------------------------ */
+const fanRoot = new THREE.Group();
+scene.add(fanRoot);
+
+const POLE_TOP = 1.5;
+
+{
+  // Base — lathe profile with rounded edges and a gently domed top
+  const R = 0.7, e = 0.06;
+  const prof = [new THREE.Vector2(0.0, 0.0)];
+  const arc = (cx, cy, r, a0, a1, n) => {
+    for (let i = 0; i <= n; i++) {
+      const a = a0 + (a1 - a0) * (i / n);
+      prof.push(new THREE.Vector2(cx + r * Math.cos(a), cy + r * Math.sin(a)));
+    }
+  };
+  arc(R - e, e, e, -Math.PI / 2, 0, 8);            // bottom rounded edge
+  arc(R - 0.05, 0.075, 0.05, 0, Math.PI / 2, 8);   // top rounded edge
+  new THREE.QuadraticBezierCurve(
+    new THREE.Vector2(R - 0.05, 0.125), new THREE.Vector2(0.4, 0.135), new THREE.Vector2(0.15, 0.2)
+  ).getPoints(16).slice(1).forEach(p => prof.push(p));
+  prof.push(new THREE.Vector2(0.0, 0.2));
+
+  const base = mesh(new THREE.LatheGeometry(prof, 96), M.baseDark, { receive: true });
+  fanRoot.add(base);
+
+  // Chrome trim ring around the pole foot
+  const foot = mesh(new THREE.CylinderGeometry(0.075, 0.105, 0.09, 40), M.satin);
+  foot.position.y = 0.235;
+  fanRoot.add(foot);
+  const footRing = mesh(new THREE.TorusGeometry(0.106, 0.008, 10, 48), M.chrome);
+  footRing.rotation.x = Math.PI / 2; footRing.position.y = 0.19;
+  fanRoot.add(footRing);
+
+  // Telescopic pole: thick lower tube, slim upper tube
+  const lower = mesh(new THREE.CylinderGeometry(0.055, 0.055, 0.82, 40), M.chrome);
+  lower.position.y = 0.2 + 0.41;
+  fanRoot.add(lower);
+  const upper = mesh(new THREE.CylinderGeometry(0.041, 0.041, POLE_TOP - 1.0, 40), M.satin);
+  upper.position.y = 1.0 + (POLE_TOP - 1.0) / 2;
+  fanRoot.add(upper);
+
+  // Height-lock collar + knob
+  const collar = mesh(new THREE.CylinderGeometry(0.068, 0.068, 0.07, 40), M.plastic);
+  collar.position.y = 1.02;
+  fanRoot.add(collar);
+  const stem = mesh(new THREE.CylinderGeometry(0.014, 0.014, 0.1, 16), M.satin);
+  stem.rotation.z = Math.PI / 2; stem.position.set(0.1, 1.02, 0);
+  fanRoot.add(stem);
+  const knob = mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.03, 24), M.baseDark);
+  knob.rotation.z = Math.PI / 2; knob.position.set(0.16, 1.02, 0);
+  fanRoot.add(knob);
+
+  // Static oscillation gearbox at the pole top
+  const gear = mesh(new THREE.CylinderGeometry(0.088, 0.088, 0.1, 40), M.plastic);
+  gear.position.y = POLE_TOP - 0.02;
+  fanRoot.add(gear);
+}
+
+/* ------------------------------------------------------------------ *
+ *  Head: yaw (oscillation) → tilt → motor housing, grill, rotor
+ * ------------------------------------------------------------------ */
+const headYaw = new THREE.Group();
+headYaw.position.set(0, POLE_TOP, 0);
+fanRoot.add(headYaw);
+
+const headTilt = new THREE.Group();
+headTilt.position.set(0, 0.55, 0.12);
+headTilt.rotation.x = -0.06;   // slight upward tilt
+headYaw.add(headTilt);
+
+// Neck between gearbox and housing
+{
+  const bell = mesh(new THREE.CylinderGeometry(0.078, 0.092, 0.08, 40), M.plastic);
+  bell.position.y = 0.06;
+  headYaw.add(bell);
+  const neck = mesh(new THREE.CylinderGeometry(0.058, 0.07, 0.42, 32), M.plastic);
+  neck.position.y = 0.26;
+  headYaw.add(neck);
+}
+
+const RIM_Z = 0.31;      // z of the rotor / grill rim plane (tilt-local)
+const GRILL_R = 0.62;
+
+// Motor housing — a capsule lying along Z
+const housing = mesh(new THREE.CapsuleGeometry(0.27, 0.31, 16, 56).rotateX(Math.PI / 2), M.housing, { receive: true });
+housing.position.z = -0.325;
+headTilt.add(housing);
+{
+  const band = mesh(new THREE.TorusGeometry(0.268, 0.007, 12, 72), M.chrome);
+  band.position.z = -0.14;
+  headTilt.add(band);
+  // shaft between motor nose and hub
+  const shaft = mesh(new THREE.CylinderGeometry(0.028, 0.028, 0.24, 24).rotateX(Math.PI / 2), M.chrome);
+  shaft.position.z = 0.2;
+  headTilt.add(shaft);
+}
+
+/* ---- Control panel pod on top of the housing ---- */
+const POD_FACE_Y = 0.03;
+const pod = new THREE.Group();
+pod.position.set(0, 0.31, -0.32);
+pod.rotation.x = 0.35;
+headTilt.add(pod);
+
+const podBody = mesh(new RoundedBoxGeometry(0.42, 0.22, 0.32, 4, 0.02), M.pod, { receive: true });
+podBody.position.y = POD_FACE_Y - 0.11;
+pod.add(podBody);
+
+// Printed labels / icons (transparent decal on the pod face)
+{
+  const S = 2000, PW = 0.40, PD = 0.30;
+  const cv = document.createElement('canvas');
+  cv.width = Math.round(PW * S); cv.height = Math.round(PD * S);
+  const g = cv.getContext('2d');
+  const X = x => (x + PW / 2) * S, Z = z => (z + PD / 2) * S;
+  const ink = 'rgba(214, 224, 236, 0.92)';
+  g.strokeStyle = ink; g.fillStyle = ink; g.lineCap = 'round'; g.lineJoin = 'round';
+  const font = '700 34px -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+
+  g.font = font; g.textAlign = 'center'; g.textBaseline = 'middle';
+  try { g.letterSpacing = '2px'; } catch (_) {}
+  g.fillText('POWER', X(-0.125), Z(0.118));
+  g.fillText('SPEED', X(0), Z(0.118));
+  g.fillText('OSC',   X(0.125), Z(0.118));
+
+  // numerals under the speed LEDs
+  g.font = '700 26px -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+  try { g.letterSpacing = '0px'; } catch (_) {}
+  g.globalAlpha = 0.65;
+  [1, 2, 3, 4].forEach((n, i) => g.fillText(String(n), X(-0.045 + i * 0.03), Z(-0.081)));
+  g.globalAlpha = 1;
+
+  g.lineWidth = 5;
+  // power icon
+  {
+    const cx = X(-0.125), cy = Z(0.072), r = 17;
+    g.beginPath(); g.arc(cx, cy, r, -Math.PI / 2 + 0.6, -Math.PI / 2 - 0.6 + Math.PI * 2); g.stroke();
+    g.beginPath(); g.moveTo(cx, cy - r - 4); g.lineTo(cx, cy - 2); g.stroke();
+  }
+  // speed icon — ascending bars
+  {
+    const cx = X(0), base = Z(0.086);
+    [0, 1, 2, 3].forEach(i => {
+      const h = 10 + i * 7;
+      g.beginPath(); g.moveTo(cx - 24 + i * 16, base); g.lineTo(cx - 24 + i * 16, base - h); g.stroke();
+    });
+  }
+  // oscillation icon — left/right sweep
+  {
+    const cx = X(0.125), cy = Z(0.076);
+    g.beginPath(); g.moveTo(cx - 24, cy); g.lineTo(cx + 24, cy); g.stroke();
+    [-1, 1].forEach(s => {
+      g.beginPath();
+      g.moveTo(cx + s * 24 - s * 11, cy - 10); g.lineTo(cx + s * 24, cy); g.lineTo(cx + s * 24 - s * 11, cy + 10);
+      g.stroke();
+    });
+  }
+
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  const decal = new THREE.Mesh(
+    new THREE.PlaneGeometry(PW, PD),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, toneMapped: false,
+                                   polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })
+  );
+  decal.rotation.x = -Math.PI / 2;
+  decal.position.y = POD_FACE_Y + 0.0004;
+  pod.add(decal);
+}
+
+/* ---- LEDs ---- */
+const glowTex = radialTexture([[0, 'rgba(255,255,255,1)'], [0.25, 'rgba(255,255,255,0.45)'], [1, 'rgba(255,255,255,0)']], 128);
+const OFF_COLOR = new THREE.Color(0x1b1e23);
+
+function makeLED(x, z, radius = 0.0095) {
+  const mat = new THREE.MeshStandardMaterial({ color: OFF_COLOR.clone(), emissive: 0x000000, roughness: 0.25, metalness: 0 });
+  const dome = new THREE.Mesh(new THREE.SphereGeometry(radius, 20, 12, 0, Math.PI * 2, 0, Math.PI / 2), mat);
+  dome.position.set(x, POD_FACE_Y, z);
+  pod.add(dome);
+  const spriteMat = new THREE.SpriteMaterial({ map: glowTex, color: 0xffffff, transparent: true, opacity: 0,
+                                                blending: THREE.AdditiveBlending, depthWrite: false });
+  const sprite = new THREE.Sprite(spriteMat);
+  sprite.scale.setScalar(0.075);
+  sprite.position.set(x, POD_FACE_Y + 0.006, z);
+  pod.add(sprite);
+  return { mat, sprite, color: new THREE.Color(0xffffff), targetColor: new THREE.Color(0xffffff), level: 0, target: 0 };
+}
+
+const LED_Z = -0.115;
+const ledPower = makeLED(-0.125, LED_Z, 0.011);
+const ledSpeed = [0, 1, 2, 3].map(i => makeLED(-0.045 + i * 0.03, LED_Z));
+const ledOsc   = makeLED(0.125, LED_Z, 0.011);
+
+const C_RED = new THREE.Color(0xff2a1c), C_GREEN = new THREE.Color(0x2cff8a);
+const C_CYAN = new THREE.Color(0x35c8ff), C_AMBER = new THREE.Color(0xffa91c);
+ledPower.color.copy(C_RED); ledPower.targetColor.copy(C_RED);
+ledSpeed.forEach(l => { l.color.copy(C_CYAN); l.targetColor.copy(C_CYAN); });
+ledOsc.color.copy(C_AMBER); ledOsc.targetColor.copy(C_AMBER);
+
+function updateLED(l, dt) {
+  const k = 1 - Math.exp(-dt / 0.09);
+  l.level += (l.target - l.level) * k;
+  l.color.lerp(l.targetColor, 1 - Math.exp(-dt / 0.12));
+  l.mat.emissive.copy(l.color);
+  l.mat.emissiveIntensity = l.level * 3.2;
+  l.mat.color.copy(OFF_COLOR).lerp(l.color, l.level * 0.85);
+  l.sprite.material.color.copy(l.color);
+  l.sprite.material.opacity = l.level * 0.9;
+}
+
+/* ---- Buttons ---- */
+const buttons = {};
+const hitTargets = [];
+const BTN_TRAVEL = 0.013;
+
+function makeButton(id, x) {
+  const holder = new THREE.Group();
+  holder.position.set(x, POD_FACE_Y, 0);
+  pod.add(holder);
+
+  const bezel = mesh(new THREE.TorusGeometry(0.0505, 0.0055, 12, 48), M.chrome);
+  bezel.rotation.x = Math.PI / 2; bezel.position.y = 0.001;
+  holder.add(bezel);
+
+  const capMat = new THREE.MeshStandardMaterial({ color: 0x3a3f47, roughness: 0.38, metalness: 0.85, emissive: 0x5fd0ff, emissiveIntensity: 0 });
+  const capGeo = new THREE.CylinderGeometry(0.041, 0.044, 0.03, 48);
+  const cap = mesh(capGeo, capMat);
+  cap.position.y = 0.012;
+  holder.add(cap);
+  const capTop = mesh(new THREE.CylinderGeometry(0.03, 0.036, 0.004, 48),
+                      new THREE.MeshStandardMaterial({ color: 0x8a919c, roughness: 0.3, metalness: 1 }));
+  capTop.position.y = 0.0275;
+  cap.add(capTop); capTop.position.y = 0.017;
+
+  // generous invisible hit-area so the buttons are easy to click
+  const hit = new THREE.Mesh(new THREE.CylinderGeometry(0.068, 0.068, 0.09, 24), new THREE.MeshBasicMaterial({ visible: false }));
+  hit.position.y = 0.02;
+  hit.userData.button = id;
+  holder.add(hit);
+  hitTargets.push(hit);
+
+  buttons[id] = { id, cap, capMat, press: 0, hover: 0, hovered: false, baseY: cap.position.y };
+}
+makeButton('power', -0.125);
+makeButton('speed', 0);
+makeButton('osc', 0.125);
+
+/* ---- Grill (chrome) ---- */
+function buildGrill(side, spokes, ringRadii, depth) {
+  const wire = 0.0055;
+  const zOf = r => side * depth * (1 - Math.pow(r / GRILL_R, 2));
+  const geos = [];
+  ringRadii.forEach(r => geos.push(new THREE.TorusGeometry(r, wire, 6, 72).translate(0, 0, zOf(r))));
+  for (let i = 0; i < spokes; i++) {
+    const a = (i / spokes) * Math.PI * 2, pts = [];
+    for (let k = 0; k <= 16; k++) {
+      const r = 0.05 + (GRILL_R - 0.05) * (k / 16);
+      pts.push(new THREE.Vector3(Math.cos(a) * r, Math.sin(a) * r, zOf(r)));
+    }
+    geos.push(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 32, wire, 5, false));
+  }
+  return mesh(mergeGeometries(geos), M.chrome, { receive: false });
+}
+
+const grill = new THREE.Group();
+grill.position.z = RIM_Z;
+headTilt.add(grill);
+{
+  grill.add(buildGrill(+1, 28, [0.13, 0.235, 0.34, 0.44, 0.53], 0.24));
+  grill.add(buildGrill(-1, 20, [0.16, 0.3, 0.44, 0.54], 0.21));
+
+  // rim: band + two edge rings
+  const band = mesh(new THREE.CylinderGeometry(GRILL_R + 0.004, GRILL_R + 0.004, 0.07, 96, 1, true).rotateX(Math.PI / 2),
+                    new THREE.MeshStandardMaterial({ color: 0xf2f4f7, metalness: 1, roughness: 0.14, side: THREE.DoubleSide, envMapIntensity: 1.25 }));
+  grill.add(band);
+  [-1, 1].forEach(s => {
+    const ring = mesh(new THREE.TorusGeometry(GRILL_R + 0.004, 0.011, 10, 96), M.chrome);
+    ring.position.z = s * 0.035;
+    grill.add(ring);
+  });
+
+  // centre caps
+  const capF = mesh(new THREE.SphereGeometry(0.078, 32, 12, 0, Math.PI * 2, 0, Math.PI / 2).rotateX(Math.PI / 2).scale(1, 1, 0.45), M.chrome);
+  capF.position.z = 0.24 - 0.004;
+  grill.add(capF);
+  const capB = mesh(new THREE.CylinderGeometry(0.085, 0.085, 0.03, 32).rotateX(Math.PI / 2), M.chrome);
+  capB.position.z = -0.21 + 0.012;
+  grill.add(capB);
+
+  // clamp at the bottom of the rim
+  const clamp = mesh(new RoundedBoxGeometry(0.09, 0.05, 0.09, 3, 0.012), M.plastic);
+  clamp.position.set(0, -GRILL_R - 0.006, 0);
+  grill.add(clamp);
+}
+
+/* ---- Rotor: 5 curved, twisted blades ---- */
+function makeBladeGeometry() {
+  const nu = 30, nv = 10, r0 = 0.05, r1 = 0.545;
+  const pos = [], idx = [];
+  for (let i = 0; i <= nu; i++) {
+    const u = i / nu;
+    const r = r0 + (r1 - r0) * u;
+
+    // chord: slim root, broad paddle, rounded tip
+    let w = 0.045 + 0.19 * Math.sin(Math.PI * Math.pow(u, 1.45));
+    const t = Math.max(0, (u - 0.86) / 0.14);
+    w *= Math.sqrt(1 - t * t * 0.97);
+
+    const pitch = THREE.MathUtils.degToRad(44 - 24 * u);      // twist: steeper at the root
+    const sp = Math.sin(pitch), cp = Math.cos(pitch);
+    const sweep = 0.12 * u * u;                              // scimitar curve, tip lags
+    const rake  = 0.035 * u * u;
+
+    for (let j = 0; j <= nv; j++) {
+      const v = (j / nv) * 2 - 1;
+      const c = v * w * 0.5;                                 // + = leading edge
+      const h = -0.22 * (1 - v * v) * w;                     // cambered cross-section
+      pos.push(r, c * cp + h * sp - sweep, -c * sp + h * cp + rake);
+    }
+  }
+  for (let i = 0; i < nu; i++) {
+    for (let j = 0; j < nv; j++) {
+      const a = i * (nv + 1) + j, b = a + 1, c = a + nv + 1, d = c + 1;
+      idx.push(a, c, b, b, c, d);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+const BLADES = 5;
+const rotor = new THREE.Group();
+rotor.position.z = RIM_Z;
+headTilt.add(rotor);
+{
+  const bladeGeo = makeBladeGeometry();
+  for (let i = 0; i < BLADES; i++) {
+    const b = mesh(bladeGeo, M.blade, { receive: true });
+    b.rotation.z = (i / BLADES) * Math.PI * 2;
+    rotor.add(b);
+  }
+  const hubBody = mesh(new THREE.CylinderGeometry(0.1, 0.11, 0.075, 48).rotateX(Math.PI / 2), M.hub);
+  hubBody.position.z = -0.005;
+  rotor.add(hubBody);
+  const spinner = mesh(new THREE.SphereGeometry(0.1, 40, 16, 0, Math.PI * 2, 0, Math.PI / 2).rotateX(Math.PI / 2).scale(1, 1, 0.8), M.hub);
+  spinner.position.z = 0.03;
+  rotor.add(spinner);
+}
+
+// Soft "motion blur" disc — grows with the rotation speed
+const blurMat = new THREE.MeshBasicMaterial({
+  map: radialTexture([[0, 'rgba(210,235,255,0.55)'], [0.7, 'rgba(210,235,255,0.75)'], [0.93, 'rgba(210,235,255,0.55)'], [1, 'rgba(210,235,255,0)']]),
+  transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide, toneMapped: false,
+});
+const blurDisc = new THREE.Mesh(new THREE.CircleGeometry(0.575, 64), blurMat);
+blurDisc.position.z = RIM_Z + 0.02;
+blurDisc.renderOrder = 5;
+headTilt.add(blurDisc);
+
+/* ------------------------------------------------------------------ *
+ *  Airflow streaks (world-space, so oscillation fans them out)
+ * ------------------------------------------------------------------ */
+const MAXP = 800;
+const pPos = new Float32Array(MAXP * 3);
+const pVel = new Float32Array(MAXP * 3);
+const pLife = new Float32Array(MAXP);
+const pMax = new Float32Array(MAXP).fill(1);
+const linePos = new Float32Array(MAXP * 6);
+const lineAlpha = new Float32Array(MAXP * 2);
+
+const airGeo = new THREE.BufferGeometry();
+airGeo.setAttribute('position', new THREE.BufferAttribute(linePos, 3).setUsage(THREE.DynamicDrawUsage));
+airGeo.setAttribute('aAlpha', new THREE.BufferAttribute(lineAlpha, 1).setUsage(THREE.DynamicDrawUsage));
+const airLines = new THREE.LineSegments(airGeo, new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false,
+  vertexShader: `attribute float aAlpha; varying float vA;
+    void main(){ vA = aAlpha; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `varying float vA;
+    void main(){ gl_FragColor = vec4(0.88, 0.95, 1.0, vA); }`,
+}));
+airLines.frustumCulled = false;
+airLines.renderOrder = 6;
+scene.add(airLines);
+
+const _v = new THREE.Vector3(), _d = new THREE.Vector3(), _t = new THREE.Vector3();
+const _q = new THREE.Quaternion();
+let pCursor = 0, spawnAcc = 0;
+
+function spawnParticle(speedFrac) {
+  const i = pCursor; pCursor = (pCursor + 1) % MAXP;
+  const a = Math.random() * Math.PI * 2;
+  const rr = Math.sqrt(Math.random()) * 0.5;
+  const ca = Math.cos(a), sa = Math.sin(a);
+
+  _v.set(ca * rr, sa * rr, RIM_Z + 0.42);
+  headTilt.localToWorld(_v);
+
+  headTilt.getWorldQuaternion(_q);
+  _d.set(0, 0, 1).applyQuaternion(_q);
+  _t.set(-sa, ca, 0).applyQuaternion(_q);                     // swirl direction
+  const out = new THREE.Vector3(ca, sa, 0).applyQuaternion(_q);
+
+  const spd = (1.2 + 3.4 * speedFrac) * (0.85 + Math.random() * 0.3);
+  const k = i * 3;
+  pPos[k] = _v.x; pPos[k + 1] = _v.y; pPos[k + 2] = _v.z;
+  pVel[k]     = _d.x * spd + _t.x * rr * speedFrac * 1.3 + out.x * rr * 0.5 + (Math.random() - 0.5) * 0.18;
+  pVel[k + 1] = _d.y * spd + _t.y * rr * speedFrac * 1.3 + out.y * rr * 0.5 + (Math.random() - 0.5) * 0.18;
+  pVel[k + 2] = _d.z * spd + _t.z * rr * speedFrac * 1.3 + out.z * rr * 0.5 + (Math.random() - 0.5) * 0.18;
+  pMax[i] = pLife[i] = 1.6 + Math.random() * 1.0;
+}
+
+function updateAir(dt, speedFrac) {
+  if (speedFrac > 0.02) {
+    spawnAcc += dt * 300 * speedFrac;
+    while (spawnAcc >= 1) { spawnAcc -= 1; spawnParticle(speedFrac); }
+  }
+  const drag = Math.max(0, 1 - 0.3 * dt);
+  for (let i = 0; i < MAXP; i++) {
+    const k = i * 3, l = i * 6;
+    if (pLife[i] <= 0) { lineAlpha[i * 2] = lineAlpha[i * 2 + 1] = 0; continue; }
+    pLife[i] -= dt;
+    pVel[k] *= drag; pVel[k + 1] *= drag; pVel[k + 2] *= drag;
+    pPos[k] += pVel[k] * dt; pPos[k + 1] += pVel[k + 1] * dt; pPos[k + 2] += pVel[k + 2] * dt;
+    if (pPos[k + 1] < 0.02) pLife[i] = 0;
+
+    const t = 1 - pLife[i] / pMax[i];
+    const a = Math.min(t / 0.12, 1) * Math.min((1 - t) / 0.4, 1) * 0.5;
+    const tail = 0.075;
+    linePos[l]     = pPos[k];                    linePos[l + 1] = pPos[k + 1];                    linePos[l + 2] = pPos[k + 2];
+    linePos[l + 3] = pPos[k] - pVel[k] * tail;   linePos[l + 4] = pPos[k + 1] - pVel[k + 1] * tail; linePos[l + 5] = pPos[k + 2] - pVel[k + 2] * tail;
+    lineAlpha[i * 2] = a;
+    lineAlpha[i * 2 + 1] = 0;
+  }
+  airGeo.attributes.position.needsUpdate = true;
+  airGeo.attributes.aAlpha.needsUpdate = true;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Fan logic
+ * ------------------------------------------------------------------ */
+const SPEEDS = [0, 7, 13, 21, 31];             // rad/s for levels 1..4
+const OSC_AMP = THREE.MathUtils.degToRad(45);
+const OSC_RATE = 0.55;                         // rad/s of the sweep phase (≈ 11 s per full cycle)
+
+const state = { on: false, speed: 1, osc: false };
+let omega = 0, yaw = 0, oscPhase = 0;
+
+const $ = id => document.getElementById(id);
+const toastEl = $('toast');
+let toastTimer = 0;
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 1800);
+}
+
+function refreshIndicators() {
+  ledPower.target = state.on ? 1 : 0.55;
+  ledPower.targetColor.copy(state.on ? C_GREEN : C_RED);
+  ledSpeed.forEach((l, i) => { l.target = state.on && i < state.speed ? 1 : 0; });
+  ledOsc.target = state.on && state.osc ? 1 : 0;
+
+  $('stPower').classList.toggle('on', state.on);
+  $('stPowerTxt').textContent = state.on ? 'On' : 'Off';
+  $('stSpeed').textContent = state.on ? String(state.speed) : '—';
+  $('stOsc').classList.toggle('on', state.on && state.osc);
+  $('stOscTxt').textContent = state.on && state.osc ? 'On' : 'Off';
+}
+
+const actions = {
+  power() {
+    state.on = !state.on;
+    if (state.on && state.osc) oscPhase = Math.asin(THREE.MathUtils.clamp(yaw / OSC_AMP, -1, 1));
+    refreshIndicators();
+  },
+  speed() {
+    if (!state.on) return toast('Turn the fan on first');
+    state.speed = state.speed % 4 + 1;
+    refreshIndicators();
+  },
+  osc() {
+    if (!state.on) return toast('Turn the fan on first');
+    state.osc = !state.osc;
+    if (state.osc) oscPhase = Math.asin(THREE.MathUtils.clamp(yaw / OSC_AMP, -1, 1));
+    refreshIndicators();
+  },
+};
+
+function pressButton(id) {
+  buttons[id].press = 1;
+  actions[id]();
+}
+refreshIndicators();
+
+/* ------------------------------------------------------------------ *
+ *  Picking (Raycaster) — click vs. drag aware
+ * ------------------------------------------------------------------ */
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+const occluders = [housing, podBody];
+const dom = renderer.domElement;
+
+function pick(ev) {
+  const r = dom.getBoundingClientRect();
+  ndc.set(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.intersectObjects(hitTargets, false)[0];
+  if (!hit) return null;
+  const block = raycaster.intersectObjects(occluders, false)[0];
+  if (block && block.distance < hit.distance - 1e-4) return null;     // hidden behind the housing
+  return hit.object.userData.button;
+}
+
+let down = null;
+stage.addEventListener('pointerdown', ev => {
+  cancelCameraTween();
+  const id = pick(ev);
+  down = { id, x: ev.clientX, y: ev.clientY, t: performance.now() };
+  if (id) controls.enabled = false;          // don't orbit when pressing a button
+}, true);
+
+window.addEventListener('pointerup', ev => {
+  controls.enabled = true;
+  if (!down) return;
+  const moved = Math.hypot(ev.clientX - down.x, ev.clientY - down.y);
+  if (down.id && moved < 8 && performance.now() - down.t < 700 && pick(ev) === down.id) pressButton(down.id);
+  down = null;
+});
+window.addEventListener('pointercancel', () => { controls.enabled = true; down = null; });
+
+dom.addEventListener('pointermove', ev => {
+  if (ev.buttons) return;
+  const id = pick(ev);
+  Object.values(buttons).forEach(b => { b.hovered = b.id === id; });
+  dom.style.cursor = id ? 'pointer' : 'grab';
+});
+dom.addEventListener('pointerleave', () => Object.values(buttons).forEach(b => { b.hovered = false; }));
+
+window.addEventListener('keydown', ev => {
+  if (ev.repeat || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  const k = ev.key.toLowerCase();
+  if (k === 'p') pressButton('power');
+  else if (k === 's') pressButton('speed');
+  else if (k === 'o') pressButton('osc');
+});
+
+/* ------------------------------------------------------------------ *
+ *  Camera presets
+ * ------------------------------------------------------------------ */
+let tween = null;
+let inPanelView = false;
+const viewBtn = $('viewBtn');
+
+function cancelCameraTween() { tween = null; }
+viewBtn.addEventListener('click', () => {
+  inPanelView = !inPanelView;
+  const dest = inPanelView ? PANEL : OVERVIEW;
+  tween = { t: 0, dur: 1.2, p0: camera.position.clone(), t0: controls.target.clone(), p1: dest.pos, t1: dest.target };
+  viewBtn.textContent = inPanelView ? 'Overview' : 'Control panel view';
+});
+
+function stepTween(dt) {
+  if (!tween) return;
+  tween.t = Math.min(1, tween.t + dt / tween.dur);
+  const e = tween.t < 0.5 ? 4 * tween.t ** 3 : 1 - Math.pow(-2 * tween.t + 2, 3) / 2;
+  camera.position.lerpVectors(tween.p0, tween.p1, e);
+  controls.target.lerpVectors(tween.t0, tween.t1, e);
+  if (tween.t >= 1) tween = null;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Main loop
+ * ------------------------------------------------------------------ */
+const clock = new THREE.Clock();
+
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  // rotor inertia: smooth spin-up, friction-like spin-down that ends in a full stop
+  const target = state.on ? SPEEDS[state.speed] : 0;
+  if (target > 0) omega += (target - omega) * (1 - Math.exp(-dt / (target > omega ? 0.9 : 0.7)));
+  else omega = Math.max(0, omega - dt * (0.6 + omega * 0.9));
+  rotor.rotation.z += omega * dt;
+  const speedFrac = omega / SPEEDS[4];
+
+  // oscillation: sweep ±45°, smoothly return to centre when switched off
+  let yawTarget = 0, tau = 0.55;
+  if (state.on && state.osc) {
+    oscPhase += OSC_RATE * dt;
+    yawTarget = OSC_AMP * Math.sin(oscPhase);
+    tau = 0.18;
+  }
+  yaw += (yawTarget - yaw) * (1 - Math.exp(-dt / tau));
+  if (Math.abs(yaw) < 1e-4 && yawTarget === 0) yaw = 0;
+  headYaw.rotation.y = yaw;
+
+  // buttons & LEDs
+  for (const b of Object.values(buttons)) {
+    b.press = Math.max(0, b.press - dt * 5);
+    const depth = Math.sin(Math.min(1, b.press * 1.6) * Math.PI / 2);
+    b.cap.position.y = b.baseY - BTN_TRAVEL * depth;
+    b.hover += ((b.hovered ? 1 : 0) - b.hover) * (1 - Math.exp(-dt / 0.08));
+    b.capMat.emissiveIntensity = b.hover * 0.35 + depth * 0.5;
+  }
+  updateLED(ledPower, dt);
+  ledSpeed.forEach(l => updateLED(l, dt));
+  updateLED(ledOsc, dt);
+
+  blurMat.opacity = Math.pow(THREE.MathUtils.clamp((omega - 10) / 21, 0, 1), 1.2) * 0.3;
+
+  stepTween(dt);
+  controls.update();
+  scene.updateMatrixWorld();
+  updateAir(dt, speedFrac);
+
+  renderer.render(scene, camera);
+});
+
+/* ------------------------------------------------------------------ *
+ *  Resize
+ * ------------------------------------------------------------------ */
+function onResize() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  camera.aspect = w / h;
+  camera.fov = w / h < 0.8 ? 52 : 38;      // a bit wider on portrait screens
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}
+window.addEventListener('resize', onResize);
+onResize();
+
+// handy for debugging from the console: fan.press('power' | 'speed' | 'osc')
+window.fan = { state, press: pressButton };
+</script>
+</body>
+</html>

@@ -1,0 +1,854 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Melty Sundae</title>
+<style>
+  :root {
+    --ink: #4b2312;
+    --panel: rgba(255, 255, 255, 0.62);
+    --accent: #ff5c8a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #9fe3dc; }
+  body {
+    font-family: ui-rounded, "SF Pro Rounded", "Nunito", "Trebuchet MS", system-ui, sans-serif;
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+  }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+
+  #title {
+    position: fixed; top: 20px; left: 24px; pointer-events: none;
+  }
+  #title h1 {
+    margin: 0; font-size: clamp(22px, 4vw, 34px); letter-spacing: 0.01em; line-height: 1;
+    color: #fff; text-shadow: 0 3px 0 var(--accent), 0 6px 14px rgba(75, 35, 18, 0.25);
+  }
+  #title p { margin: 8px 0 0; font-size: 13px; opacity: 0.75; }
+
+  #controls {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 14px;
+    padding: 10px 16px; border-radius: 999px;
+    background: var(--panel); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    box-shadow: 0 6px 24px rgba(75, 35, 18, 0.18);
+    font-size: 14px; font-weight: 600; white-space: nowrap;
+  }
+  #controls label { display: flex; align-items: center; gap: 10px; }
+  #controls output { min-width: 3.2em; text-align: right; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: clamp(90px, 22vw, 180px); accent-color: var(--accent); }
+  button {
+    font: inherit; font-weight: 700; color: #fff; background: var(--accent);
+    border: 0; border-radius: 999px; padding: 7px 14px; cursor: pointer;
+    box-shadow: 0 3px 0 #d63d6c;
+  }
+  button:active { transform: translateY(2px); box-shadow: 0 1px 0 #d63d6c; }
+
+  @media (max-width: 520px) {
+    #title { top: 14px; left: 16px; }
+    #title p { display: none; }
+    #controls { bottom: 14px; gap: 10px; padding: 8px 12px; font-size: 13px; }
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="title">
+  <h1>Melty Sundae</h1>
+  <p>drag to orbit &middot; scroll to zoom &middot; click the scoops to poke</p>
+</div>
+<div id="controls">
+  <label>Heat
+    <input id="heat" type="range" min="0" max="2.5" step="0.05" value="1">
+    <output id="heatOut">1.0&times;</output>
+  </label>
+  <button id="refreeze" type="button">Refreeze</button>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+/* ------------------------------------------------------------------ *
+ *  Constants & helpers
+ * ------------------------------------------------------------------ */
+const TAU = Math.PI * 2;
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const rand = (a, b) => a + Math.random() * (b - a);
+const angDiff = (a, b) => {
+  let d = (a - b) % TAU;
+  if (d > Math.PI) d -= TAU;
+  if (d < -Math.PI) d += TAU;
+  return d;
+};
+
+const PAL = {
+  bg: 0x9fe3dc, table: 0x84d6cc,
+  plate: 0xfff7ee, plateInner: 0xffeede, coral: 0xff7fa5,
+  coneA: 0xf6c56f, coneB: 0xe6a44a, rib: 0xb9772e,
+  strawberry: 0xff8fb8, vanilla: 0xffe9a6,
+  glaze: 0x5a2a14, cherry: 0xe0143c, stem: 0x3f8a45,
+};
+
+// Sundae dimensions (world units, plate top is y = 0)
+const TIP_Y = 0.85, CONE_H = 3, CONE_R = 1.25, RIM_Y = TIP_Y + CONE_H;
+const COLLAR_TOP = TIP_Y + 1.0;
+const R1 = 1.35, C1 = RIM_Y + 0.62;     // lower scoop
+const R2 = 1.10, C2 = C1 + 1.25;        // upper scoop
+const coneR = y => CONE_R * clamp((y - TIP_Y) / CONE_H, 0, 1);
+
+/* ------------------------------------------------------------------ *
+ *  Renderer, scene, camera
+ * ------------------------------------------------------------------ */
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.85;
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(PAL.bg);
+scene.fog = new THREE.Fog(PAL.bg, 24, 60);
+
+// Image-based light gives the glaze something to reflect (the "gloss")
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.4;
+
+const BASE_FOV = 38;
+const camera = new THREE.PerspectiveCamera(BASE_FOV, 1, 0.5, 200);
+camera.position.set(8.5, 6.8, 12.5);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 3.3, 0);
+controls.enableDamping = true;
+controls.enablePan = false;
+controls.minDistance = 8;
+controls.maxDistance = 30;
+controls.maxPolarAngle = Math.PI / 2 - 0.04;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.7;
+let resumeSpin = 0;
+controls.addEventListener('start', () => { controls.autoRotate = false; clearTimeout(resumeSpin); });
+controls.addEventListener('end', () => { resumeSpin = setTimeout(() => (controls.autoRotate = true), 3500); });
+
+/* ------------------------------------------------------------------ *
+ *  Lighting
+ * ------------------------------------------------------------------ */
+scene.add(new THREE.HemisphereLight(0xfff2f6, 0x9fd8d0, 0.55));
+
+const key = new THREE.DirectionalLight(0xfff0dd, 1.7);
+key.position.set(5, 12, 6);
+key.target.position.set(0, 2, 0);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+Object.assign(key.shadow.camera, { left: -8, right: 8, top: 10, bottom: -6, near: 1, far: 40 });
+key.shadow.bias = -0.0004;
+key.shadow.normalBias = 0.03;
+key.shadow.radius = 4;
+scene.add(key, key.target);
+
+const rim = new THREE.DirectionalLight(0xffb3d1, 1.4);
+rim.position.set(-7, 5, -8);
+scene.add(rim);
+
+const fill = new THREE.PointLight(0xfff5c2, 10, 22, 1.6);
+fill.position.set(-4, 3.5, 5);
+scene.add(fill);
+
+/* ------------------------------------------------------------------ *
+ *  Materials
+ * ------------------------------------------------------------------ */
+const lowPoly = (color, extra = {}) =>
+  new THREE.MeshStandardMaterial({ color, flatShading: true, roughness: 0.62, metalness: 0, ...extra });
+
+const glazeMat = new THREE.MeshPhysicalMaterial({
+  color: PAL.glaze, roughness: 0.16, metalness: 0,
+  clearcoat: 1, clearcoatRoughness: 0.06, envMapIntensity: 1.4,
+});
+
+/* ------------------------------------------------------------------ *
+ *  Table + plate + cone stand
+ * ------------------------------------------------------------------ */
+const table = new THREE.Mesh(
+  new THREE.CircleGeometry(80, 48).rotateX(-Math.PI / 2),
+  new THREE.MeshStandardMaterial({ color: PAL.table, roughness: 0.95 })
+);
+table.position.y = -0.18;
+table.receiveShadow = true;
+scene.add(table);
+
+const plate = new THREE.Group();
+{
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(3.7, 3.1, 0.18, 40), lowPoly(PAL.plate, { roughness: 0.35 }));
+  body.position.y = -0.09;
+  const inner = new THREE.Mesh(new THREE.CylinderGeometry(2.9, 2.9, 0.02, 40), lowPoly(PAL.plateInner, { roughness: 0.45 }));
+  inner.position.y = 0.01;
+  const rimTorus = new THREE.Mesh(new THREE.TorusGeometry(3.62, 0.11, 6, 40).rotateX(Math.PI / 2), lowPoly(PAL.coral, { roughness: 0.4 }));
+  rimTorus.position.y = 0.0;
+  const line = new THREE.Mesh(new THREE.TorusGeometry(2.95, 0.03, 4, 40).rotateX(Math.PI / 2), lowPoly(PAL.coral, { roughness: 0.4 }));
+  line.position.y = 0.02;
+  for (const m of [body, inner, rimTorus, line]) { m.castShadow = true; m.receiveShadow = true; plate.add(m); }
+}
+scene.add(plate);
+
+const stand = new THREE.Group();
+{
+  const metal = lowPoly(PAL.coral, { roughness: 0.35, metalness: 0.25 });
+  const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.45, 0.14, 12), metal);
+  foot.position.y = 0.07;
+  const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.85, 8), metal);
+  stem.position.y = 0.5;
+  const collarMat = metal.clone(); collarMat.side = THREE.DoubleSide;
+  const collar = new THREE.Mesh(new THREE.CylinderGeometry(0.467, 0.05, 1.0, 12, 1, true), collarMat);
+  collar.position.y = TIP_Y + 0.5;
+  const collarRing = new THREE.Mesh(new THREE.TorusGeometry(0.467, 0.035, 5, 12).rotateX(Math.PI / 2), metal);
+  collarRing.position.y = COLLAR_TOP;
+  for (const m of [foot, stem, collar, collarRing]) { m.castShadow = true; m.receiveShadow = true; stand.add(m); }
+}
+scene.add(stand);
+
+/* ------------------------------------------------------------------ *
+ *  Waffle cone (checker pockets + helical ribs)
+ * ------------------------------------------------------------------ */
+const cone = new THREE.Group();
+{
+  const g = new THREE.ConeGeometry(CONE_R, CONE_H, 16, 8, true).rotateX(Math.PI).translate(0, TIP_Y + CONE_H / 2, 0).toNonIndexed();
+  const pos = g.attributes.position;
+  const col = new Float32Array(pos.count * 3);
+  const cA = new THREE.Color(PAL.coneA), cB = new THREE.Color(PAL.coneB), c = new THREE.Color();
+  for (let f = 0; f < pos.count; f += 3) {
+    let cx = 0, cy = 0, cz = 0;
+    for (let k = 0; k < 3; k++) { cx += pos.getX(f + k); cy += pos.getY(f + k); cz += pos.getZ(f + k); }
+    cx /= 3; cy /= 3; cz /= 3;
+    const u = (Math.atan2(cz, cx) / TAU + 0.5) * 16;
+    const v = ((cy - TIP_Y) / CONE_H) * 8;
+    c.copy(((Math.floor(u) + Math.floor(v)) & 1) ? cA : cB);
+    for (let k = 0; k < 3; k++) col.set([c.r, c.g, c.b], (f + k) * 3);
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  const body = new THREE.Mesh(g, new THREE.MeshStandardMaterial({
+    vertexColors: true, flatShading: true, roughness: 0.85, side: THREE.DoubleSide,
+  }));
+  body.castShadow = true; body.receiveShadow = true;
+  cone.add(body);
+
+  // Diamond ribs: helices wound in both directions
+  const ribs = [];
+  for (const dir of [1, -1]) {
+    for (let i = 0; i < 10; i++) {
+      const phi0 = (i / 10) * TAU;
+      const pts = [];
+      for (let k = 0; k <= 60; k++) {
+        const t = (k / 60) * 0.97;
+        const r = CONE_R * (1 - t) * 0.985;
+        const a = phi0 + dir * 1.2 * TAU * t;
+        pts.push(new THREE.Vector3(r * Math.cos(a), RIM_Y - CONE_H * t, r * Math.sin(a)));
+      }
+      ribs.push(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 60, 0.028, 4, false));
+    }
+  }
+  const ribMesh = new THREE.Mesh(mergeGeometries(ribs), lowPoly(PAL.rib, { roughness: 0.8 }));
+  ribMesh.castShadow = true;
+  cone.add(ribMesh);
+
+  const lip = new THREE.Mesh(new THREE.TorusGeometry(CONE_R, 0.08, 6, 24).rotateX(Math.PI / 2), lowPoly(PAL.coneB, { roughness: 0.8 }));
+  lip.position.y = RIM_Y;
+  lip.castShadow = true;
+  cone.add(lip);
+}
+scene.add(cone);
+
+/* ------------------------------------------------------------------ *
+ *  Wobble rig. Everything above the cone rim lives in `inner`, which is
+ *  expressed in rest-pose world coordinates, so geometry below can just
+ *  use absolute heights.
+ * ------------------------------------------------------------------ */
+const wobble = new THREE.Group();
+wobble.position.y = RIM_Y;
+const inner = new THREE.Group();
+inner.position.y = -RIM_Y;
+wobble.add(inner);
+scene.add(wobble);
+
+/* ------------------------------------------------------------------ *
+ *  Scoops (low-poly sphere with spiral ridges) + ruffled skirt
+ * ------------------------------------------------------------------ */
+function makeScoop(R, color, amp, twist) {
+  const g = new THREE.SphereGeometry(R, 20, 14);
+  const p = g.attributes.position, v = new THREE.Vector3();
+  for (let i = 0; i < p.count; i++) {
+    v.fromBufferAttribute(p, i);
+    const th = Math.acos(clamp(v.y / R, -1, 1));
+    const ph = Math.atan2(v.z, v.x);
+    v.multiplyScalar(1 + amp * Math.sin(th) * Math.sin(3 * ph - twist * th));
+    p.setXYZ(i, v.x, v.y, v.z);
+  }
+  g.computeVertexNormals();
+  const m = new THREE.Mesh(g, lowPoly(color, { roughness: 0.55 }));
+  m.castShadow = true; m.receiveShadow = true;
+  return m;
+}
+
+const scoopLow = makeScoop(R1, PAL.strawberry, 0.03, 5);
+scoopLow.position.y = C1;
+const scoopTop = makeScoop(R2, PAL.vanilla, 0.03, 5);
+scoopTop.position.y = C2;
+scoopTop.rotation.y = 0.6;
+inner.add(scoopLow, scoopTop);
+
+{
+  const skirtGeo = new THREE.SphereGeometry(0.26, 8, 6);
+  const skirtMat = lowPoly(PAL.strawberry, { roughness: 0.55 });
+  const n = 14;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * TAU;
+    const m = new THREE.Mesh(skirtGeo, skirtMat);
+    m.position.set(Math.cos(a) * 1.28, RIM_Y + 0.13, Math.sin(a) * 1.28);
+    m.scale.set(1, 0.85, 1);
+    m.castShadow = true; m.receiveShadow = true;
+    inner.add(m);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ *  Glaze surface profile: a polyline that follows the top scoop, crosses
+ *  the crease and continues down the lower scoop. Glaze is a surface of
+ *  revolution hugging this profile, so drips can run across both scoops.
+ * ------------------------------------------------------------------ */
+const profile = (() => {
+  const d = C2 - C1;
+  const y0 = (R1 * R1 - R2 * R2 + d * d) / (2 * d);          // crease height above C1
+  const thTopEnd = Math.acos((C1 + y0 - C2) / R2);
+  const thLowStart = Math.acos(y0 / R1);
+  const thLowEnd = (96 * Math.PI) / 180;
+  const P = [];
+  const N1 = 48, N2 = 24;
+  for (let i = 0; i <= N1; i++) {
+    const th = (thTopEnd * i) / N1;
+    P.push([R2 * Math.sin(th), C2 + R2 * Math.cos(th), Math.sin(th), Math.cos(th)]);
+  }
+  for (let i = 1; i <= N2; i++) {
+    const th = thLowStart + ((thLowEnd - thLowStart) * i) / N2;
+    P.push([R1 * Math.sin(th), C1 + R1 * Math.cos(th), Math.sin(th), Math.cos(th)]);
+  }
+  for (let pass = 0; pass < 3; pass++) {           // soften the concave crease
+    const src = P.map(p => [p[2], p[3]]);
+    for (let i = 1; i < P.length - 1; i++) {
+      const x = src[i - 1][0] + 2 * src[i][0] + src[i + 1][0];
+      const y = src[i - 1][1] + 2 * src[i][1] + src[i + 1][1];
+      const l = Math.hypot(x, y);
+      P[i][2] = x / l; P[i][3] = y / l;
+    }
+  }
+  const S = [0];
+  for (let i = 1; i < P.length; i++) S[i] = S[i - 1] + Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1]);
+  const total = S[S.length - 1];
+
+  const K = 600, tab = new Float32Array(K * 4);
+  let j = 0;
+  for (let k = 0; k < K; k++) {
+    const s = (total * k) / (K - 1);
+    while (j < P.length - 2 && S[j + 1] < s) j++;
+    const t = clamp((s - S[j]) / (S[j + 1] - S[j]), 0, 1);
+    for (let c = 0; c < 4; c++) tab[k * 4 + c] = P[j][c] + (P[j + 1][c] - P[j][c]) * t;
+  }
+  return { total, K, tab };
+})();
+
+const sm = { r: 0, y: 0, nr: 0, ny: 1 };            // sample result (reused)
+function sampleProfile(s) {
+  const { K, tab, total } = profile;
+  const f = clamp(s / total, 0, 1) * (K - 1);
+  const i = Math.min(K - 2, Math.floor(f)), t = f - i, a = i * 4, b = a + 4;
+  sm.r = tab[a] + (tab[b] - tab[a]) * t;
+  sm.y = tab[a + 1] + (tab[b + 1] - tab[a + 1]) * t;
+  const nr = tab[a + 2] + (tab[b + 2] - tab[a + 2]) * t;
+  const ny = tab[a + 3] + (tab[b + 3] - tab[a + 3]) * t;
+  const l = Math.hypot(nr, ny) || 1;
+  sm.nr = nr / l; sm.ny = ny / l;
+  return sm;
+}
+
+// Glaze thickness as a function of distance to its edge (rounded lip)
+const thickAt = d => 0.012 + 0.095 * Math.sqrt(clamp(d / 0.22, 0, 1));
+const GLAZE_FULL = 0.107;
+
+const _gp = new THREE.Vector3();
+function glazePoint(phi, s, off, out = _gp) {
+  sampleProfile(s);
+  const r = sm.r + sm.nr * off;
+  return out.set(r * Math.cos(phi), sm.y + sm.ny * off, r * Math.sin(phi));
+}
+
+/* ------------------------------------------------------------------ *
+ *  Drips
+ * ------------------------------------------------------------------ */
+const N_DRIPS = 7;
+const drips = [];
+let baseS = 1.12;
+let heat = 1;
+
+const bulbGeo = new THREE.SphereGeometry(1, 10, 8);
+for (let k = 0; k < N_DRIPS; k++) {
+  const max = rand(0.8, 1.6);
+  const d = {
+    phi: ((k + rand(-0.22, 0.22)) / N_DRIPS) * TAU,
+    w: rand(0.26, 0.36),
+    max, len: rand(0, max * 0.8), shown: 0,
+    speed: rand(0.09, 0.16), phase: rand(0, 10),
+    boost: 0, bulbScale: 1, glint: rand(0, 1),
+    bulb: new THREE.Mesh(bulbGeo, glazeMat),
+  };
+  d.shown = d.len;
+  d.bulb.castShadow = true;
+  inner.add(d.bulb);
+  drips.push(d);
+}
+
+function edgeL(phi, t) {
+  let L = baseS + 0.10 * Math.sin(3 * phi + t * 0.3) + 0.06 * Math.sin(5 * phi - t * 0.4 + 1.3);
+  for (const d of drips) {
+    const x = angDiff(phi, d.phi) / d.w;
+    L += d.shown * Math.exp(-(x * x) * (x * x));
+  }
+  return Math.min(L, profile.total - 0.03);
+}
+
+/* ------------------------------------------------------------------ *
+ *  Glaze mesh (rebuilt every frame from the drip state)
+ * ------------------------------------------------------------------ */
+const SEG = 96, RING = 40, COLS = RING + 1;
+const glazeGeo = new THREE.BufferGeometry();
+const gPos = new Float32Array((SEG + 1) * COLS * 3);
+glazeGeo.setAttribute('position', new THREE.BufferAttribute(gPos, 3).setUsage(THREE.DynamicDrawUsage));
+glazeGeo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(gPos.length), 3).setUsage(THREE.DynamicDrawUsage));
+{
+  const idx = [];
+  for (let i = 0; i < SEG; i++) {
+    for (let j = 0; j < RING; j++) {
+      const a = i * COLS + j, b = (i + 1) * COLS + j, c = a + 1, d = b + 1;
+      idx.push(a, b, c, b, d, c);
+    }
+  }
+  glazeGeo.setIndex(idx);
+}
+glazeGeo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, C1, 0), 4);
+const glaze = new THREE.Mesh(glazeGeo, glazeMat);
+glaze.castShadow = true;
+glaze.frustumCulled = false;
+inner.add(glaze);
+
+function updateGlaze(t) {
+  for (let i = 0; i <= SEG; i++) {
+    const phi = (i / SEG) * TAU, cs = Math.cos(phi), sn = Math.sin(phi);
+    const L = edgeL(phi, t);
+    for (let j = 0; j <= RING; j++) {
+      const u = j / RING;
+      const s = L * (1 - Math.pow(1 - u, 1.7));      // denser rings near the edge
+      const th = thickAt(L - s);
+      sampleProfile(s);
+      const r = sm.r + sm.nr * th, o = (i * COLS + j) * 3;
+      gPos[o] = r * cs; gPos[o + 1] = sm.y + sm.ny * th; gPos[o + 2] = r * sn;
+    }
+  }
+  glazeGeo.attributes.position.needsUpdate = true;
+  glazeGeo.computeVertexNormals();
+  const n = glazeGeo.attributes.normal.array;
+  for (let j = 0; j <= RING; j++) {                  // stitch the φ seam
+    const a = j * 3, b = (SEG * COLS + j) * 3;
+    for (let c = 0; c < 3; c++) n[a + c] = n[b + c] = n[a + c] + n[b + c];
+    const l = Math.hypot(n[a], n[a + 1], n[a + 2]) || 1;
+    for (let c = 0; c < 3; c++) n[a + c] = n[b + c] = n[a + c] / l;
+  }
+  for (let i = 0; i <= SEG; i++) {                   // pole
+    const o = i * COLS * 3;
+    n[o] = 0; n[o + 1] = 1; n[o + 2] = 0;
+  }
+  glazeGeo.attributes.normal.needsUpdate = true;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Sprinkles + cherry
+ * ------------------------------------------------------------------ */
+{
+  const N = 70;
+  const sprinkles = new THREE.InstancedMesh(
+    new THREE.CapsuleGeometry(0.018, 0.075, 2, 6),
+    new THREE.MeshStandardMaterial({ roughness: 0.4, flatShading: true }), N);
+  const colors = [0xff4f86, 0xffffff, 0xffd23f, 0x38b6ff, 0x7cf29c, 0xb388ff].map(c => new THREE.Color(c));
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), n = new THREE.Vector3(), tan = new THREE.Vector3();
+  const rd = new THREE.Vector3(), Y = new THREE.Vector3(0, 1, 0), one = new THREE.Vector3(1, 1, 1), p = new THREE.Vector3();
+  for (let i = 0; i < N; i++) {
+    const phi = rand(0, TAU), s = 0.7 * Math.sqrt(Math.random()) + 0.1;
+    sampleProfile(s);
+    n.set(sm.nr * Math.cos(phi), sm.ny, sm.nr * Math.sin(phi));
+    glazePoint(phi, s, GLAZE_FULL + 0.008, p);
+    rd.randomDirection();
+    tan.copy(rd).addScaledVector(n, -rd.dot(n)).normalize();
+    q.setFromUnitVectors(Y, tan);
+    sprinkles.setMatrixAt(i, m.compose(p, q, one));
+    sprinkles.setColorAt(i, colors[i % colors.length]);
+  }
+  sprinkles.castShadow = true;
+  inner.add(sprinkles);
+}
+
+const cherryG = new THREE.Group();
+cherryG.position.set(0, C2 + R2 + 0.09, 0);
+{
+  const cherry = new THREE.Mesh(
+    new THREE.SphereGeometry(0.28, 12, 9),
+    new THREE.MeshPhysicalMaterial({ color: PAL.cherry, roughness: 0.25, clearcoat: 1, clearcoatRoughness: 0.1 }));
+  cherry.position.y = 0.2;
+  cherry.scale.y = 0.95;
+  const curve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(0, 0.42, 0), new THREE.Vector3(0.04, 0.6, 0.02), new THREE.Vector3(0.17, 0.78, 0)]);
+  const stem = new THREE.Mesh(new THREE.TubeGeometry(curve, 10, 0.022, 5), lowPoly(PAL.stem));
+  cherry.castShadow = stem.castShadow = true;
+  cherryG.add(cherry, stem);
+  inner.add(cherryG);
+}
+
+/* ------------------------------------------------------------------ *
+ *  Puddle on the plate
+ * ------------------------------------------------------------------ */
+const puddleGeo = new THREE.CircleGeometry(1, 36).rotateX(-Math.PI / 2);
+{
+  const p = puddleGeo.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), z = p.getZ(i), a = Math.atan2(z, x);
+    const k = 1 + 0.12 * Math.sin(3 * a) + 0.08 * Math.sin(5 * a + 1);
+    p.setXYZ(i, x * k, 0, z * k);
+  }
+  puddleGeo.computeVertexNormals();
+}
+const puddle = new THREE.Mesh(puddleGeo, glazeMat);
+puddle.position.y = 0.03;
+puddle.receiveShadow = true;
+scene.add(puddle);
+const PUDDLE_MIN = 0.5;
+let puddleR = PUDDLE_MIN, puddleShown = PUDDLE_MIN;
+
+/* ------------------------------------------------------------------ *
+ *  Sparkle particles (glistening glints & landing bursts)
+ * ------------------------------------------------------------------ */
+const MAXP = 700;
+const pPos = new Float32Array(MAXP * 3), pSize = new Float32Array(MAXP),
+      pAlpha = new Float32Array(MAXP), pCol = new Float32Array(MAXP * 3);
+const pVel = new Float32Array(MAXP * 3), pLife = new Float32Array(MAXP),
+      pMax = new Float32Array(MAXP).fill(1), pSize0 = new Float32Array(MAXP), pGrav = new Float32Array(MAXP);
+let pCursor = 0;
+
+const pGeo = new THREE.BufferGeometry();
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3).setUsage(THREE.DynamicDrawUsage));
+pGeo.setAttribute('aSize', new THREE.BufferAttribute(pSize, 1).setUsage(THREE.DynamicDrawUsage));
+pGeo.setAttribute('aAlpha', new THREE.BufferAttribute(pAlpha, 1).setUsage(THREE.DynamicDrawUsage));
+pGeo.setAttribute('aColor', new THREE.BufferAttribute(pCol, 3));
+const pMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false,
+  uniforms: { uScale: { value: 800 } },
+  vertexShader: /* glsl */`
+    attribute float aSize; attribute float aAlpha; attribute vec3 aColor;
+    uniform float uScale;
+    varying float vA; varying vec3 vC;
+    void main() {
+      vA = aAlpha; vC = aColor;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = aSize * uScale / max(-mv.z, 0.1);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: /* glsl */`
+    varying float vA; varying vec3 vC;
+    void main() {
+      vec2 p = gl_PointCoord * 2.0 - 1.0;
+      float core = exp(-dot(p, p) * 10.0);
+      float star = exp(-abs(p.x) * 14.0) * exp(-abs(p.y) * 2.5)
+                 + exp(-abs(p.y) * 14.0) * exp(-abs(p.x) * 2.5);
+      float a = clamp(core + star * 0.9, 0.0, 1.0) * vA;
+      if (a < 0.01) discard;
+      gl_FragColor = vec4(vC, a);
+    }`,
+});
+const points = new THREE.Points(pGeo, pMat);
+points.frustumCulled = false;
+scene.add(points);
+
+const GLINT_COLORS = [[1, 1, 1], [1, 0.95, 0.72], [1, 0.82, 0.92]];
+function emit(x, y, z, vx, vy, vz, life, size, grav = 0) {
+  const i = pCursor; pCursor = (pCursor + 1) % MAXP;
+  const c = GLINT_COLORS[(Math.random() * GLINT_COLORS.length) | 0];
+  pPos.set([x, y, z], i * 3); pVel.set([vx, vy, vz], i * 3); pCol.set(c, i * 3);
+  pLife[i] = pMax[i] = life; pSize0[i] = size; pGrav[i] = grav;
+  pGeo.attributes.aColor.needsUpdate = true;
+}
+function burst(x, y, z, n, speed, size = 0.2) {
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, TAU), sp = rand(0.3, 1) * speed;
+    emit(x, y, z, Math.cos(a) * sp, rand(0.4, 1.2) * speed, Math.sin(a) * sp, rand(0.45, 0.9), size * rand(0.7, 1.2), 5);
+  }
+}
+function updateParticles(dt) {
+  for (let i = 0; i < MAXP; i++) {
+    if (pLife[i] <= 0) { pSize[i] = 0; pAlpha[i] = 0; continue; }
+    pLife[i] -= dt;
+    const k = 1 - pLife[i] / pMax[i];
+    pVel[i * 3 + 1] -= pGrav[i] * dt;
+    pPos[i * 3] += pVel[i * 3] * dt; pPos[i * 3 + 1] += pVel[i * 3 + 1] * dt; pPos[i * 3 + 2] += pVel[i * 3 + 2] * dt;
+    const tw = Math.sin(Math.PI * clamp(k, 0, 1));
+    pAlpha[i] = tw;
+    pSize[i] = pSize0[i] * (0.45 + 0.55 * tw);
+  }
+  pGeo.attributes.position.needsUpdate = true;
+  pGeo.attributes.aSize.needsUpdate = true;
+  pGeo.attributes.aAlpha.needsUpdate = true;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Falling / rolling droplets
+ *   fall  : bulb detaches and drops onto the ruffle
+ *   roll  : runs down the waffle cone
+ *   fall2 : leaves the collar and lands on the plate
+ * ------------------------------------------------------------------ */
+const dropGeo = new THREE.SphereGeometry(1, 10, 8);
+const drops = [];
+for (let i = 0; i < 40; i++) {
+  const mesh = new THREE.Mesh(dropGeo, glazeMat);
+  mesh.visible = false; mesh.castShadow = true;
+  scene.add(mesh);
+  drops.push({ mesh, state: 'dead', x: 0, y: 0, z: 0, ang: 0, rad: 0, vy: 0, v: 0, trail: 0 });
+}
+const LAND1 = RIM_Y + 0.3, G = 7;
+
+function spawnDrop(p) {
+  const d = drops.find(o => o.state === 'dead');
+  if (!d) return;
+  d.state = 'fall'; d.x = p.x; d.y = p.y; d.z = p.z;
+  d.ang = Math.atan2(p.z, p.x); d.rad = Math.hypot(p.x, p.z); d.vy = 0; d.trail = 0;
+  d.mesh.visible = true;
+  d.mesh.scale.set(0.1, 0.14, 0.1);
+}
+
+function updateDrops(dt) {
+  for (const d of drops) {
+    if (d.state === 'dead') continue;
+    if (d.state === 'fall' || d.state === 'fall2') {
+      d.vy -= G * dt;
+      d.y += d.vy * dt;
+      d.mesh.scale.set(0.085, clamp(0.09 - d.vy * 0.03, 0.09, 0.2), 0.085);
+      d.trail -= dt;
+      if (d.trail <= 0) { d.trail = 0.05; emit(d.x, d.y + 0.1, d.z, 0, 0, 0, 0.4, 0.14); }
+      if (d.state === 'fall' && d.y <= LAND1) {
+        burst(d.x, d.y, d.z, 5, 0.7, 0.16);
+        d.state = 'roll'; d.v = 0.35;
+      } else if (d.state === 'fall2' && d.y <= 0.04) {
+        burst(d.x, 0.05, d.z, 12, 1.0, 0.22);
+        puddleR = Math.min(puddleR + 0.06, 1.9);
+        d.state = 'dead'; d.mesh.visible = false;
+        continue;
+      }
+    } else if (d.state === 'roll') {
+      d.v = Math.min(d.v + 1.1 * dt, 1.6);
+      d.y -= d.v * dt;
+      const target = coneR(d.y) + 0.05 + 0.2 * clamp((d.y - RIM_Y) / 0.3, 0, 1);
+      d.rad += (Math.max(target, 0.05) - d.rad) * Math.min(1, dt * 10);
+      d.ang += Math.sin(d.y * 4 + d.ang) * 0.02 * dt;      // tiny wander
+      d.mesh.scale.set(0.06, 0.1, 0.06);
+      d.trail -= dt;
+      if (d.trail <= 0) {
+        d.trail = 0.06;
+        emit(Math.cos(d.ang) * (d.rad + 0.06), d.y, Math.sin(d.ang) * (d.rad + 0.06), 0, 0.05, 0, 0.55, 0.16);
+      }
+      if (d.y <= COLLAR_TOP) {
+        d.state = 'fall2'; d.rad = 0.467 + 0.12; d.vy = -d.v;
+      }
+    }
+    if (d.state === 'roll' || d.state === 'fall2') {
+      d.x = Math.cos(d.ang) * d.rad; d.z = Math.sin(d.ang) * d.rad;
+    }
+    d.mesh.position.set(d.x, d.y, d.z);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ *  Jiggle springs
+ * ------------------------------------------------------------------ */
+const spring = { p: 0, v: 0, tx: 0, tz: 0, vx: 0, vz: 0, cp: 0, cv: 0 };
+function updateJiggle(dt, t) {
+  spring.v += (-60 * spring.p - 3.2 * spring.v) * dt; spring.p += spring.v * dt;
+  spring.vx += (-50 * spring.tx - 3.0 * spring.vx) * dt; spring.tx += spring.vx * dt;
+  spring.vz += (-50 * spring.tz - 3.0 * spring.vz) * dt; spring.tz += spring.vz * dt;
+  // cherry follows with lag (softer spring on the wobble rotation)
+  spring.cv += (-30 * spring.cp - 1.6 * spring.cv + 40 * spring.tz) * dt; spring.cp += spring.cv * dt;
+
+  const sq = 0.018 * Math.sin(t * 2.4) + spring.p * 0.1;
+  wobble.scale.set(1 - sq * 0.5, 1 + sq, 1 - sq * 0.5);
+  wobble.rotation.z = 0.02 * Math.sin(t * 1.7) + 0.008 * Math.sin(t * 2.9 + 1) + spring.tz;
+  wobble.rotation.x = 0.016 * Math.sin(t * 1.3 + 0.6) + spring.tx;
+  cherryG.rotation.z = 0.12 * Math.sin(t * 2.6) - spring.cp * 0.8;
+  cherryG.rotation.x = 0.08 * Math.sin(t * 2.1 + 1) - spring.tx * 0.6;
+  wobble.updateMatrixWorld(true);
+}
+
+/* ------------------------------------------------------------------ *
+ *  Drip simulation
+ * ------------------------------------------------------------------ */
+const _tip = new THREE.Vector3();
+function updateDrips(dt, t) {
+  baseS = 1.12 + 0.03 * Math.sin(t * 0.2);
+  for (const d of drips) {
+    const flow = d.speed * heat * (0.65 + 0.35 * Math.sin(t * 0.6 + d.phase)) * (1 + d.boost * 2);
+    d.boost = Math.max(0, d.boost - dt * 0.6);
+    d.len += flow * dt;
+    d.bulbScale = Math.min(1, d.bulbScale + dt / 3);
+
+    // bulb detaches → droplet falls, tongue snaps back
+    if (d.len >= d.max) {
+      const br = 0.12;
+      const tipL = edgeL(d.phi, t);
+      glazePoint(d.phi, tipL - br * 0.4, 0.04 + br * 0.35, _tip);
+      inner.localToWorld(_tip);
+      spawnDrop(_tip);
+      d.len *= 0.4;
+      d.max = rand(0.8, 1.6);
+      d.speed = rand(0.09, 0.16);
+      d.bulbScale = 0;
+    }
+    if (d.len > d.shown) d.shown = d.len;
+    else d.shown += (d.len - d.shown) * Math.min(1, dt * 3);
+  }
+}
+
+function updateBulbs(dt, t) {
+  for (const d of drips) {
+    const br = (0.075 + 0.045 * clamp(d.len / d.max, 0, 1)) * d.bulbScale;
+    d.bulb.visible = br > 0.01;
+    if (!d.bulb.visible) continue;
+    const tipL = edgeL(d.phi, t);
+    glazePoint(d.phi, tipL - br * 0.4, 0.04 + br * 0.35, d.bulb.position);
+    d.bulb.scale.set(br, br * 1.3, br);
+
+    // glints riding the drip front
+    d.glint -= dt;
+    if (d.glint <= 0 && heat > 0) {
+      d.glint = rand(0.4, 1.1) / (heat + 0.3);
+      _tip.copy(d.bulb.position).add(new THREE.Vector3(rand(-0.06, 0.06), rand(0, 0.08), rand(-0.06, 0.06)));
+      inner.localToWorld(_tip);
+      emit(_tip.x, _tip.y, _tip.z, rand(-0.05, 0.05), rand(0.05, 0.18), rand(-0.05, 0.05), rand(0.6, 1.1), rand(0.2, 0.32));
+    }
+  }
+}
+
+let ambient = 0;
+function updateAmbient(dt, t) {
+  ambient -= dt;
+  if (ambient > 0) return;
+  ambient = rand(0.15, 0.4);
+  const phi = rand(0, TAU), L = edgeL(phi, t);
+  glazePoint(phi, rand(0.1, Math.max(0.15, L - 0.12)), GLAZE_FULL + 0.06, _tip);
+  inner.localToWorld(_tip);
+  emit(_tip.x, _tip.y, _tip.z, 0, 0.04, 0, rand(0.7, 1.3), rand(0.16, 0.3));
+}
+
+/* ------------------------------------------------------------------ *
+ *  Interaction: click to poke, heat slider, refreeze
+ * ------------------------------------------------------------------ */
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+const pokeTargets = [scoopLow, scoopTop, glaze, cherryG];
+let downAt = null;
+const canvas = renderer.domElement;
+canvas.addEventListener('pointerdown', e => { downAt = { x: e.clientX, y: e.clientY }; });
+canvas.addEventListener('pointerup', e => {
+  if (!downAt) return;
+  const moved = Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y);
+  downAt = null;
+  if (moved > 5) return;
+  ndc.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.intersectObjects(pokeTargets, true)[0];
+  if (!hit) return;
+  const dx = hit.point.x, dz = hit.point.z, l = Math.hypot(dx, dz) || 1;
+  spring.v += 0.9;
+  spring.vz += (dx / l) * 0.5;
+  spring.vx += (-dz / l) * 0.5;
+  burst(hit.point.x, hit.point.y, hit.point.z, 16, 1.3, 0.24);
+  for (const d of drips) d.boost = 1;
+});
+
+const heatEl = document.getElementById('heat'), heatOut = document.getElementById('heatOut');
+heatEl.addEventListener('input', () => {
+  heat = parseFloat(heatEl.value);
+  heatOut.textContent = heat.toFixed(1) + '×';
+});
+document.getElementById('refreeze').addEventListener('click', () => {
+  for (const d of drips) { d.len = rand(0, 0.2); d.shown = d.len; d.bulbScale = 0.3; d.max = rand(0.8, 1.6); }
+  puddleR = PUDDLE_MIN;
+  for (const d of drops) { d.state = 'dead'; d.mesh.visible = false; }
+  burst(0, C2 + 0.3, 0, 30, 1.6, 0.26);
+});
+
+/* ------------------------------------------------------------------ *
+ *  Resize
+ * ------------------------------------------------------------------ */
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h, false);
+  canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+  camera.aspect = w / h;
+  // keep the sundae fully framed on tall/narrow screens by widening the vertical FOV
+  const minAspect = 0.95;
+  camera.fov = camera.aspect < minAspect
+    ? THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(BASE_FOV / 2)) * (minAspect / camera.aspect)))
+    : BASE_FOV;
+  camera.updateProjectionMatrix();
+  pMat.uniforms.uScale.value = renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* ------------------------------------------------------------------ *
+ *  Main loop
+ * ------------------------------------------------------------------ */
+const clock = new THREE.Clock();
+let time = 0;
+updateJiggle(0, 0);
+updateGlaze(0);
+
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  time += dt;
+
+  updateJiggle(dt, time);
+  updateDrips(dt * (heat > 0 ? 1 : 0), time);
+  updateGlaze(time);
+  updateBulbs(dt, time);
+  updateDrops(dt);
+  updateAmbient(dt, time);
+  updateParticles(dt);
+
+  puddleR = Math.max(PUDDLE_MIN, puddleR - 0.02 * puddleR * dt);
+  puddleShown += (puddleR - puddleShown) * Math.min(1, dt * 2);
+  puddle.scale.setScalar(puddleShown);
+  puddle.visible = puddleShown > PUDDLE_MIN + 0.03;
+
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
